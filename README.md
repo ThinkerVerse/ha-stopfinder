@@ -75,7 +75,7 @@ goal, the hub is the way — the details above are the map.
   change it (useful to alert on).
 - **Active trip** — trip name (also encodes AM/PM and direction).
 
-## Upgrading to 0.4.0
+## Upgrading to 1.0.0
 
 **Breaking:** the GPS-status sensor no longer reports `NoSignal`. It now uses the
 app's own vocabulary, so any automation matching on `NoSignal` needs updating —
@@ -195,7 +195,7 @@ flow exports, APKs, and source maps.
 
 ```bash
 # after committing changes and bumping manifest.json "version"
-git tag v0.4.0
+git tag v1.0.0
 git push origin main --tags
 # then create a GitHub Release from that tag; HACS will offer it as an update
 ```
