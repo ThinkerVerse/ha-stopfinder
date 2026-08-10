@@ -1,0 +1,30 @@
+# Reverse-engineering captures — NEVER commit these
+*.mitm
+*.har
+*.flows
+*.pcap
+*.pcapng
+captures/
+mitmproxy/
+*.apk
+*.js.map
+
+# secrets
+secrets.yaml
+*.token
+.env
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# editor/OS
+.DS_Store
+.idea/
+.vscode/

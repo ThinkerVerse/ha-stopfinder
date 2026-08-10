@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Stopfinder",
+        "description": "Sign in with the same email and password you use in the Stopfinder app. Your district must have Stopfinder enabled.",
+        "data": {
+          "username": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password.",
+      "cannot_connect": "Could not reach Stopfinder. Check the email and try again.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "This Stopfinder account is already set up."
+    }
+  }
+}
