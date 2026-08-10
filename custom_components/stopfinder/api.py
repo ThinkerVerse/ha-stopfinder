@@ -303,7 +303,7 @@ def _parse_gps(data: dict[str, Any] | None) -> GpsFix | None:
     """Parse a /gps response into a GpsFix, or None if there's no usable fix.
 
     Sample: {"rowId":0,"startTime":"2026-08-10T08:00:08",
-             "timestamp":1786363208,"longitude":-85.9375,"latitude":39.1729}
+             "timestamp":1786363208,"longitude":-74.0060,"latitude":40.7128}
     """
     if not data:
         return None
