@@ -77,7 +77,7 @@ from commits, issues, and traffic dumps. Add `*.mitm` and flow exports to
 ## Install via HACS (recommended)
 
 1. HACS → three-dot menu → **Custom repositories**.
-2. Add `https://github.com/YOUR_USERNAME/ha-stopfinder`, category **Integration**.
+2. Add `https://github.com/ThinkerVerse/ha-stopfinder`, category **Integration**.
 3. Install **Stopfinder**, then restart Home Assistant.
 4. Settings → Devices & Services → **Add Integration** → Stopfinder, and sign in.
 
