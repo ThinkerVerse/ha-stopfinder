@@ -28,6 +28,17 @@
       "reauth_failed": "Could not find the configuration entry to re-authenticate."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Stopfinder options",
+        "description": "How often to check the bus position while a trip is running. Nothing is polled outside a trip window.",
+        "data": {
+          "gps_poll_seconds": "Seconds between position checks"
+        }
+      }
+    }
+  },
   "entity": {
     "sensor": {
       "gps_status": {

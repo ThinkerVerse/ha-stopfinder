@@ -55,8 +55,11 @@ def _install_homeassistant_stubs() -> None:
     config_entries = _module("homeassistant.config_entries")
 
     class ConfigEntry:
-        def __init__(self, data: dict | None = None) -> None:
+        def __init__(
+            self, data: dict | None = None, options: dict | None = None
+        ) -> None:
             self.data = data or {}
+            self.options = options or {}
             self.entry_id = "test"
 
     class ConfigFlowResult(dict):
@@ -66,9 +69,13 @@ def _install_homeassistant_stubs() -> None:
         def __init_subclass__(cls, **kwargs) -> None:
             super().__init_subclass__()
 
+    class OptionsFlow:
+        pass
+
     config_entries.ConfigEntry = ConfigEntry
     config_entries.ConfigFlowResult = ConfigFlowResult
     config_entries.ConfigFlow = ConfigFlow
+    config_entries.OptionsFlow = OptionsFlow
 
     core = _module("homeassistant.core")
 
@@ -76,6 +83,7 @@ def _install_homeassistant_stubs() -> None:
         pass
 
     core.HomeAssistant = HomeAssistant
+    core.callback = lambda func: func
 
     exceptions = _module("homeassistant.exceptions")
 

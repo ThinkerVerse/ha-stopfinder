@@ -8,6 +8,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntry, ConfigFlowResult
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import StopfinderApi, StopfinderAuthError, StopfinderError, Tokens
@@ -15,12 +16,16 @@ from .const import (
     CONF_BASE_URI,
     CONF_CLIENT_KEYS,
     CONF_DEVICE_ID,
+    CONF_GPS_POLL_SECONDS,
     CONF_PASSWORD,
     CONF_REFRESH_TOKEN,
     CONF_SF_CLIENT_ID,
     CONF_SUBSCRIBER_ID,
     CONF_USERNAME,
     DOMAIN,
+    GPS_POLL_SECONDS,
+    GPS_POLL_SECONDS_MAX,
+    GPS_POLL_SECONDS_MIN,
 )
 
 STEP_USER_SCHEMA = vol.Schema(
@@ -40,6 +45,13 @@ class StopfinderConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         self._reauth_entry: ConfigEntry | None = None
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: ConfigEntry,
+    ) -> StopfinderOptionsFlow:
+        return StopfinderOptionsFlow(config_entry)
 
     async def _async_validate(
         self, username: str, password: str, device_id: str
@@ -168,4 +180,39 @@ class StopfinderConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=STEP_REAUTH_SCHEMA,
             description_placeholders={"username": username},
             errors=errors,
+        )
+
+
+class StopfinderOptionsFlow(config_entries.OptionsFlow):
+    """Let the poll cadence be tuned after setup."""
+
+    def __init__(self, config_entry: ConfigEntry) -> None:
+        # Keep the id rather than the entry: assigning self.config_entry is
+        # deprecated in newer cores, and the base-class property that replaces it
+        # does not exist in older ones.
+        self._entry_id = config_entry.entry_id
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        entry = self.hass.config_entries.async_get_entry(self._entry_id)
+        current = (entry.options if entry else {}).get(
+            CONF_GPS_POLL_SECONDS, GPS_POLL_SECONDS
+        )
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_GPS_POLL_SECONDS, default=current
+                    ): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(min=GPS_POLL_SECONDS_MIN, max=GPS_POLL_SECONDS_MAX),
+                    )
+                }
+            ),
         )
