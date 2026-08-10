@@ -150,8 +150,8 @@ class TestPollInterval:
         )
 
     def test_option_overrides_the_default(self) -> None:
-        coordinator = self._coordinator({CONF_GPS_POLL_SECONDS: 10})
-        assert coordinator.gps_poll_interval == timedelta(seconds=10)
+        coordinator = self._coordinator({CONF_GPS_POLL_SECONDS: 30})
+        assert coordinator.gps_poll_interval == timedelta(seconds=30)
 
     def test_string_option_is_coerced(self) -> None:
         coordinator = self._coordinator({CONF_GPS_POLL_SECONDS: "45"})
@@ -185,15 +185,15 @@ class TestPollTimerLifecycle:
         coordinator._start_gps_polling()
         assert coordinator._polling_interval == timedelta(seconds=GPS_POLL_SECONDS)
 
-        coordinator.entry.options = {CONF_GPS_POLL_SECONDS: 10}
+        coordinator.entry.options = {CONF_GPS_POLL_SECONDS: 30}
         coordinator.async_apply_options()
 
-        assert coordinator._polling_interval == timedelta(seconds=10)
+        assert coordinator._polling_interval == timedelta(seconds=30)
         assert coordinator._unsub_gps is not None
 
     def test_applying_options_while_idle_does_not_start_polling(self) -> None:
         coordinator = self._coordinator()
-        coordinator.entry.options = {CONF_GPS_POLL_SECONDS: 10}
+        coordinator.entry.options = {CONF_GPS_POLL_SECONDS: 30}
 
         coordinator.async_apply_options()
 

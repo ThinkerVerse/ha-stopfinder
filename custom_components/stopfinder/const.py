@@ -89,7 +89,7 @@ SCHEDULE_TICK_SECONDS: Final = 60
 # normal case, so we poll faster than that during a live trip and not at all
 # outside one. Tunable per config entry; the timer only exists while a window is
 # open.
-GPS_POLL_SECONDS: Final = 20
+GPS_POLL_SECONDS: Final = 10
 GPS_POLL_SECONDS_MIN: Final = 10
 GPS_POLL_SECONDS_MAX: Final = 300
 # A fix older than this is treated as stale -> entity unavailable. Guards against

@@ -7,7 +7,7 @@ uses.
 > Reverse-engineered from observed traffic and the app bundle. No official API
 > exists. Automated access may violate Stopfinder's ToS — the realistic risk is
 > your account being disabled, which also breaks the app for you. This
-> integration polls only during route windows, at the same cadence the app does.
+> integration polls only during route windows, and not at all outside them.
 
 ## How it works
 
@@ -23,13 +23,40 @@ uses.
    before/after padding that defines the route window.
 5. **Live position** — `GET {base}/gps?groupName={clientId}_{dataSourceId}_{busNumber}`
    returns `{latitude, longitude, timestamp}`. The coordinator polls this every
-   20s (configurable) while a trip window is open. Outside a window the timer
+   10s (configurable) while a trip window is open. Outside a window the timer
    does not exist at all, so nothing is requested.
 
-The `/gps` endpoint replaced an earlier SignalR/WebSocket approach: it's the same
-host and auth as every other call, so there's no WebSocket, MessagePack, or
-negotiate handshake to get wrong. (The SignalR `VehicleEventHub` still exists in
-the app but isn't needed.)
+## Why REST polling and not SignalR?
+
+The app's primary source is a SignalR hub, and `/gps` is only its fallback. An
+early version of this integration did try the hub (via `pysignalr`) and got no
+data; the `/gps` capture then made it unnecessary. The bundle explains what that
+attempt was up against — connecting means getting *all* of the following right:
+
+- **`wss://{base}/VehicleEventHub?stopfinderadminversion=2.0&groupName={group}`**,
+  with `skipNegotiation: true` and the WebSockets transport, so there is no
+  `/negotiate` POST to discover anything from. Clients that always negotiate
+  cannot talk to it at all.
+- **MessagePack**, not JSON (`{name: "messagepack", version: 1}`), so frames are
+  binary.
+- **The `opaqueToken`, not the JWT**, passed as an `access_token` query
+  parameter. Using the REST token here fails auth — an easy and silent mistake.
+- **`keepAliveIntervalInMilliseconds: 10000` against a
+  `serverTimeoutInMilliseconds: 60000`**, so a client that does not ping gets
+  dropped.
+- Group membership is implicit in the query string: `VehicleEventHub` has no join
+  call. (Only `RealTimeUpdateHub` exposes `Subscribe`/`Unsubscribe` invokes.)
+  Server→client method is `ReceiveVehicleEvents`, payload at `data[0]`.
+
+What it buys is **latency, not data**: the frames carry the same
+`Timestamp`/`Latitude`/`Longitude` the REST endpoint returns — the app remaps the
+REST response into that exact shape so both paths feed one code path — and speed
+and heading are absent from the app entirely. Against that, it costs a runtime
+dependency (this integration currently has none, which matters for HACS), a
+persistent socket to supervise, reconnect handling, and a binary protocol to keep
+working across app updates. At a 10s poll the gap is small enough that REST wins
+on robustness. If sub-10s tracking or `RealTimeUpdates` ETAs ever become the
+goal, the hub is the way — the details above are the map.
 
 ## Entities (per student)
 
@@ -56,7 +83,7 @@ app's own vocabulary, so any automation matching on `NoSignal` needs updating �
 unchanged; only the state strings are.
 
 The poll interval is now a per-entry option (**Configure** on the integration
-card), defaulting to 20s while a trip is running.
+card), defaulting to 10s while a trip is running.
 
 ## Design notes
 
@@ -73,7 +100,7 @@ therefore gated on age (`GPS_STALE_AFTER_SECONDS`, 300). That is not a guess:
 that is the *fallback* half of `iif(connected, signalRStream, polling)`. Normally
 the app receives pushed vehicle events over its SignalR hub as they happen, which
 is why its map moves more often than once a minute. Being REST-only, adopting 60s
-would make the app's degraded case our normal case, so the default is **20s while
+would make the app's degraded case our normal case, so the default is **10s while
 a trip is running** and nothing at all outside a window.
 
 The window state, not a flag, controls the timer: the schedule tick arms it when a
@@ -139,7 +166,7 @@ Copy `custom_components/stopfinder` into your Home Assistant
    with your Stopfinder email and password.
 
 **Configure** on the integration card exposes the position-check interval
-(default 20s, range 10-300s), which applies only while a trip window is open.
+(default 10s, range 10-300s), which applies only while a trip window is open.
 
 The manifest must end up at exactly
 `config/custom_components/stopfinder/manifest.json`. Dropping the whole repo
