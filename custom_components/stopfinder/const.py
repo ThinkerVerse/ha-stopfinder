@@ -35,14 +35,34 @@ PATH_STUDENTS: Final = "/students"
 PATH_GPS: Final = "/gps"              # GET /gps?groupName={clientId}_{dataSourceId}_{busNumber}
 
 # --- Derived GPS status (the /gps payload has NO status field) ----------------
-# We infer these from whether a fresh fix is present.
+# The app derives status client-side too, and writes it onto the trip object as
+# `gpsStatus`. These are its four values, verbatim from the bundle's enum:
+#   Searching = 0, NotAvailable = 1, NoVehicleAssigned = 2, ValidGPS = 3
 GPS_VALID: Final = "ValidGPS"
-GPS_NO_SIGNAL: Final = "NoSignal"
+GPS_SEARCHING: Final = "Searching"
+GPS_NOT_AVAILABLE: Final = "NotAvailable"
+GPS_NO_VEHICLE: Final = "NoVehicleAssigned"
+
+# Every state the GPS-status sensor can report, declared as its enum options.
+GPS_STATUSES: Final = [
+    GPS_VALID,
+    GPS_SEARCHING,
+    GPS_NOT_AVAILABLE,
+    GPS_NO_VEHICLE,
+]
+
+# --- Auth ---------------------------------------------------------------------
+# The app's HTTP interceptor refreshes on 401 *and* 203. 203 is a 2xx, so it
+# never trips raise_for_status() — it has to be checked explicitly.
+AUTH_FAILURE_STATUSES: Final = (203, 401)
+# Refresh once the JWT is within this margin of expiry.
+TOKEN_REFRESH_MARGIN_SECONDS: Final = 300
 
 # --- Config entry keys -------------------------------------------------------
 CONF_USERNAME: Final = "username"
 CONF_PASSWORD: Final = "password"
 CONF_DEVICE_ID: Final = "device_id"
+CONF_REFRESH_TOKEN: Final = "refresh_token"
 CONF_BASE_URI: Final = "base_uri"
 CONF_CLIENT_KEYS: Final = "client_keys"
 CONF_SF_CLIENT_ID: Final = "sf_client_id"
@@ -56,11 +76,18 @@ DEFAULT_AFTER_TRIP_MIN: Final = 15
 
 # How often to re-evaluate which trips are active (open/close the poll window).
 SCHEDULE_TICK_SECONDS: Final = 60
-# How often to poll /gps while at least one trip is active. The app uses a
-# similar cadence; keep it modest to stay unobtrusive.
-GPS_POLL_SECONDS: Final = 15
+# How often to poll /gps while at least one trip is active.
+#
+# The app polls this endpoint on a 60s timer, and only as a *fallback* for when
+# its SignalR hub is not connected — 60s is the most traffic it ever generates
+# here. We match it rather than beat it: this endpoint is the one most likely to
+# get an account noticed, and being unobtrusive is worth more than sub-minute
+# resolution on a vehicle that reports every ~30-60s anyway.
+GPS_POLL_SECONDS: Final = 60
 # A fix older than this is treated as stale -> entity unavailable. Guards against
 # the endpoint returning a last-known/yesterday position outside a live run.
+# 300s is the app's own constant: it drops the bus from the map with the reason
+# "Has not received vehicle events in 5 minutes".
 GPS_STALE_AFTER_SECONDS: Final = 300
 
 PLATFORMS: Final = ["device_tracker", "sensor"]

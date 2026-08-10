@@ -8,15 +8,20 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
-from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorEntityDescription,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, GPS_NO_SIGNAL, GPS_VALID
+from .const import DOMAIN, GPS_STATUSES
 from .coordinator import RiderState, StopfinderCoordinator
 
 
@@ -25,35 +30,24 @@ class StopfinderSensorDescription(SensorEntityDescription):
     value_fn: Callable[[RiderState], str | None]
 
 
-def _gps_status(s: RiderState) -> str | None:
-    """Derived status: the /gps payload has no status field, so infer it.
-
-    ValidGPS when a fresh fix is present; NoSignal while a trip is active but no
-    fresh fix has arrived; None (unknown) outside any trip window.
-    """
-    if s.active_trip is None:
-        return None
-    if s.fix and s.fix.is_fresh():
-        return GPS_VALID
-    return GPS_NO_SIGNAL
-
-
 SENSORS: tuple[StopfinderSensorDescription, ...] = (
     StopfinderSensorDescription(
         key="gps_status",
-        name="GPS status",
+        translation_key="gps_status",
         icon="mdi:crosshairs-gps",
-        value_fn=_gps_status,
+        device_class=SensorDeviceClass.ENUM,
+        options=GPS_STATUSES,
+        value_fn=lambda s: s.gps_status(datetime.now(timezone.utc)),
     ),
     StopfinderSensorDescription(
         key="bus_number",
-        name="Bus number",
+        translation_key="bus_number",
         icon="mdi:bus",
         value_fn=lambda s: (s.active_trip.bus_number if s.active_trip else None),
     ),
     StopfinderSensorDescription(
         key="trip",
-        name="Active trip",
+        translation_key="trip",
         icon="mdi:map-marker-path",
         value_fn=lambda s: (s.active_trip.name if s.active_trip else None),
     ),

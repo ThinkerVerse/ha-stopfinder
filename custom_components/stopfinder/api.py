@@ -30,6 +30,7 @@ from yarl import URL
 
 from .const import (
     APP_VERSION,
+    AUTH_FAILURE_STATUSES,
     DISCOVERY_URL,
     PATH_APIVERSIONS,
     GPS_STALE_AFTER_SECONDS,
@@ -105,6 +106,43 @@ class Trip:
     dropoff_stop_name: str
     before_trip_min: int
     after_trip_min: int
+    # Per-trip shift the app's isTripRunning() applies to both ends of the
+    # window *before* the student's before/after padding. A district that sets it
+    # (it can even push a stop across midnight, which the app renders as
+    # "(+1)"/"(-1)") would otherwise leave us with a window skewed by that many
+    # minutes.
+    adjust_minutes: int = 0
+
+    @property
+    def window_start(self) -> datetime:
+        """Start of the polling window."""
+        return (
+            self.start_time
+            + timedelta(minutes=self.adjust_minutes)
+            - timedelta(minutes=self.before_trip_min)
+        )
+
+    @property
+    def window_end(self) -> datetime:
+        """End of the polling window."""
+        return (
+            self.finish_time
+            + timedelta(minutes=self.adjust_minutes)
+            + timedelta(minutes=self.after_trip_min)
+        )
+
+    def is_running(self, now: datetime) -> bool:
+        """Whether `now` falls inside this trip's window (inclusive, as the app)."""
+        return self.window_start <= now <= self.window_end
+
+    @property
+    def has_vehicle(self) -> bool:
+        """A trip with no bus assigned can't be tracked.
+
+        The app checks this before it builds a request at all, and reports
+        NoVehicleAssigned rather than hitting the network.
+        """
+        return bool(self.bus_number)
 
 
 @dataclass
@@ -154,6 +192,18 @@ class StopfinderApi:
             h["token"] = self._token  # custom header, not Bearer
         return h
 
+    @staticmethod
+    def _raise_for_auth(resp: aiohttp.ClientResponse) -> None:
+        """Reject the statuses the app's interceptor refreshes on.
+
+        203 has to be checked by hand: it is a 2xx, so raise_for_status() lets it
+        through and we would go on to parse a non-payload as data.
+        """
+        if resp.status in AUTH_FAILURE_STATUSES:
+            raise StopfinderAuthError(
+                f"Stopfinder returned {resp.status} (token expired?)"
+            )
+
     # -- 1. discovery ---------------------------------------------------------
 
     async def discover(self, email: str) -> str:
@@ -170,16 +220,39 @@ class StopfinderApi:
     # -- 2. login -------------------------------------------------------------
 
     async def login(self, username: str, password: str, device_id: str) -> Tokens:
-        """Exchange credentials for tokens."""
+        """Exchange credentials for tokens (grantType "password")."""
+        return await self._post_token_request(
+            {
+                "grantType": "password",
+                "username": username,
+                "password": password,
+                "deviceId": device_id,
+                "rfApiVersion": RF_API_VERSION,
+            }
+        )
+
+    async def refresh(
+        self, username: str, refresh_token: str, device_id: str
+    ) -> Tokens:
+        """Renew the JWT without re-sending the password (grantType "refresh").
+
+        The app's refreshLogin() posts to the same /tokens endpoint. The response
+        carries a *new* refreshToken — it rotates, and the app persists it — so
+        the caller must store what comes back or the next refresh will fail.
+        """
+        return await self._post_token_request(
+            {
+                "grantType": "refresh",
+                "refreshToken": refresh_token,
+                "username": username,
+                "deviceId": device_id,
+                "rfApiVersion": RF_API_VERSION,
+            }
+        )
+
+    async def _post_token_request(self, payload: dict[str, Any]) -> Tokens:
         if not self.base_uri:
-            raise StopfinderError("Call discover() before login().")
-        payload = {
-            "grantType": "password",
-            "username": username,
-            "password": password,
-            "deviceId": device_id,
-            "rfApiVersion": RF_API_VERSION,
-        }
+            raise StopfinderError("Call discover() before requesting a token.")
         headers = self._base_headers()
         headers["content-type"] = "application/json"
         async with self._session.post(
@@ -192,7 +265,7 @@ class StopfinderApi:
         token = data.get("token")
         opaque = data.get("opaqueToken")
         if not token or not opaque:
-            raise StopfinderError("Login response missing token(s)")
+            raise StopfinderError("Token response missing token(s)")
         self._token = token
         return Tokens(
             token=token,
@@ -211,12 +284,14 @@ class StopfinderApi:
         async with self._session.get(
             f"{self.base_uri}{PATH_APIVERSIONS}", headers=self._auth_headers()
         ) as resp:
+            self._raise_for_auth(resp)
             resp.raise_for_status()
             data = await resp.json()
         if not data:
             raise StopfinderError("apiversions returned no clients")
         first = data[0]
-        self.client_keys = str(first.get("clientId", ""))
+        # The app lowercases client ids when it builds X-Client-Keys.
+        self.client_keys = str(first.get("clientId", "")).lower()
         self.sf_client_id = first.get("sfClientId") or first.get("id")
         if first.get("sfApiUri"):
             self.base_uri = str(first["sfApiUri"]).rstrip("/")
@@ -228,6 +303,7 @@ class StopfinderApi:
         async with self._session.get(
             f"{self.base_uri}{PATH_SUBSCRIBER}", headers=self._auth_headers()
         ) as resp:
+            self._raise_for_auth(resp)
             resp.raise_for_status()
             return await resp.json()
 
@@ -248,6 +324,7 @@ class StopfinderApi:
         }
         url = URL(f"{self.base_uri}{PATH_STUDENTS}").with_query(params)
         async with self._session.get(url, headers=self._auth_headers()) as resp:
+            self._raise_for_auth(resp)
             resp.raise_for_status()
             data = await resp.json()
         return _parse_students(data, day)
@@ -257,13 +334,16 @@ class StopfinderApi:
     async def fetch_gps(self, group_name: str) -> GpsFix | None:
         """Poll GET /gps?groupName=... for the current bus position.
 
+        The app calls this getLastBusLocation: it is a *last known* position with
+        no notion of whether the route is running, so it will happily return
+        yesterday's fix. That is why freshness, not presence, decides
+        availability. Freshness is the caller's concern (use GpsFix.is_fresh()).
+
         Returns None when the endpoint has no usable fix (missing/zero coords).
-        Freshness is the caller's concern (use GpsFix.is_fresh()).
         """
         url = URL(f"{self.base_uri}{PATH_GPS}").with_query({"groupName": group_name})
         async with self._session.get(url, headers=self._auth_headers()) as resp:
-            if resp.status == 401:
-                raise StopfinderAuthError("GPS poll unauthorized (token expired?)")
+            self._raise_for_auth(resp)
             resp.raise_for_status()
             data = await resp.json()
         return _parse_gps(data)
@@ -355,6 +435,7 @@ def _parse_students(data: list[dict], day: date) -> list[StudentSchedule]:
                         dropoff_stop_name=t.get("dropOffStopName", ""),
                         before_trip_min=int(sched.get("beforeTrip", 15)),
                         after_trip_min=int(sched.get("afterTrip", 15)),
+                        adjust_minutes=int(t.get("adjustMinutes") or 0),
                     )
                 )
             out.append(
