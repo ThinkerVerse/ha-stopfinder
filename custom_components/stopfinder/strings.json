@@ -8,6 +8,13 @@
           "username": "Email",
           "password": "Password"
         }
+      },
+      "reauth_confirm": {
+        "title": "Stopfinder",
+        "description": "Stopfinder stopped accepting the saved credentials for {username}. Enter the password again.",
+        "data": {
+          "password": "Password"
+        }
       }
     },
     "error": {
@@ -16,7 +23,28 @@
       "unknown": "Unexpected error."
     },
     "abort": {
-      "already_configured": "This Stopfinder account is already set up."
+      "already_configured": "This Stopfinder account is already set up.",
+      "reauth_successful": "Stopfinder was re-authenticated successfully.",
+      "reauth_failed": "Could not find the configuration entry to re-authenticate."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "gps_status": {
+        "name": "GPS status",
+        "state": {
+          "ValidGPS": "Reporting",
+          "Searching": "Searching",
+          "NotAvailable": "Not available",
+          "NoVehicleAssigned": "No vehicle assigned"
+        }
+      },
+      "bus_number": {
+        "name": "Bus number"
+      },
+      "trip": {
+        "name": "Active trip"
+      }
     }
   }
 }
