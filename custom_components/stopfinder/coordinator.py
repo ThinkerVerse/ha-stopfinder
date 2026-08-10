@@ -34,6 +34,7 @@ from .api import (
 )
 from .const import (
     CONF_DEVICE_ID,
+    CONF_GPS_POLL_SECONDS,
     CONF_PASSWORD,
     CONF_REFRESH_TOKEN,
     CONF_USERNAME,
@@ -103,6 +104,7 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         self._schedule_day: date | None = None
         self._unsub_schedule = None
         self._unsub_gps = None
+        self._polling_interval: timedelta | None = None
         self._auth_failed = False
 
     # -- lifecycle ------------------------------------------------------------
@@ -116,18 +118,54 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
             self.hass, self._async_schedule_tick,
             timedelta(seconds=SCHEDULE_TICK_SECONDS),
         )
-        self._unsub_gps = async_track_time_interval(
-            self.hass, self._async_gps_tick,
-            timedelta(seconds=GPS_POLL_SECONDS),
-        )
+        # The GPS timer is not started here: the schedule tick owns it, and only
+        # runs it while a trip window is open.
         await self._async_schedule_tick(datetime.now(timezone.utc))
 
     async def async_shutdown(self) -> None:
-        for unsub in (self._unsub_schedule, self._unsub_gps):
-            if unsub:
-                unsub()
+        if self._unsub_schedule:
+            self._unsub_schedule()
         self._unsub_schedule = None
-        self._unsub_gps = None
+        self._stop_gps_polling()
+
+    # -- poll cadence ---------------------------------------------------------
+
+    @property
+    def gps_poll_interval(self) -> timedelta:
+        """Configured /gps cadence for this entry."""
+        seconds = self.entry.options.get(CONF_GPS_POLL_SECONDS, GPS_POLL_SECONDS)
+        return timedelta(seconds=int(seconds))
+
+    def _start_gps_polling(self) -> bool:
+        """Arm the GPS timer. Returns True if it was not already running."""
+        if self._unsub_gps is not None:
+            return False
+        self._polling_interval = self.gps_poll_interval
+        self._unsub_gps = async_track_time_interval(
+            self.hass, self._async_gps_tick, self._polling_interval
+        )
+        return True
+
+    def _stop_gps_polling(self) -> None:
+        """Disarm the GPS timer so nothing is polled outside a trip window."""
+        if self._unsub_gps is not None:
+            self._unsub_gps()
+            self._unsub_gps = None
+        self._polling_interval = None
+
+    def async_apply_options(self) -> None:
+        """Re-arm at a new cadence when the options change.
+
+        Deliberately not a config-entry reload: the coordinator writes the
+        rotated refresh token back to the entry, and reloading on every entry
+        update would restart the integration each time a token is renewed.
+        """
+        if self._unsub_gps is None:
+            return  # not polling; the next window will pick up the new value
+        if self._polling_interval == self.gps_poll_interval:
+            return
+        self._stop_gps_polling()
+        self._start_gps_polling()
 
     # -- auth -----------------------------------------------------------------
 
@@ -185,6 +223,7 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         if self._auth_failed:
             return
         self._auth_failed = True
+        self._stop_gps_polling()
         _LOGGER.warning(
             "Stopfinder rejected the stored credentials; asking for re-authentication"
         )
@@ -249,6 +288,15 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
                 continue
             rider.active_trip = _active_trip(rider.schedule.trips, now)
         self.async_update_listeners()
+
+        # Open or close the GPS timer to match the window state. Starting it also
+        # polls straight away rather than waiting out a first interval — the app
+        # does the same with startWith(0).
+        if self._groups_to_poll():
+            if self._start_gps_polling():
+                await self._async_gps_tick(now)
+        else:
+            self._stop_gps_polling()
 
     # -- gps poll -------------------------------------------------------------
 

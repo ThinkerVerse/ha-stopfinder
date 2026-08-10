@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
+from homeassistant.config_entries import ConfigEntry
+
 from sf.api import GpsFix, StudentSchedule, Trip
 from sf.const import (
+    CONF_GPS_POLL_SECONDS,
     GPS_NO_VEHICLE,
     GPS_NOT_AVAILABLE,
+    GPS_POLL_SECONDS,
     GPS_SEARCHING,
     GPS_VALID,
 )
@@ -135,9 +139,71 @@ class TestActiveTrip:
         assert _active_trip([_trip(adjust_minutes=30)], moment) is not None
 
 
+class TestPollInterval:
+    def _coordinator(self, options: dict) -> StopfinderCoordinator:
+        entry = ConfigEntry(options=options)
+        return StopfinderCoordinator(hass=None, entry=entry)
+
+    def test_defaults_to_the_bundled_cadence(self) -> None:
+        assert self._coordinator({}).gps_poll_interval == timedelta(
+            seconds=GPS_POLL_SECONDS
+        )
+
+    def test_option_overrides_the_default(self) -> None:
+        coordinator = self._coordinator({CONF_GPS_POLL_SECONDS: 10})
+        assert coordinator.gps_poll_interval == timedelta(seconds=10)
+
+    def test_string_option_is_coerced(self) -> None:
+        coordinator = self._coordinator({CONF_GPS_POLL_SECONDS: "45"})
+        assert coordinator.gps_poll_interval == timedelta(seconds=45)
+
+
+class TestPollTimerLifecycle:
+    """The GPS timer should exist only while a window is open."""
+
+    def _coordinator(self) -> StopfinderCoordinator:
+        return StopfinderCoordinator(hass=None, entry=ConfigEntry())
+
+    def test_starting_reports_whether_it_was_already_running(self) -> None:
+        coordinator = self._coordinator()
+
+        assert coordinator._start_gps_polling() is True
+        # Second call must not stack a second timer on top of the first.
+        assert coordinator._start_gps_polling() is False
+
+    def test_stopping_clears_the_timer_and_is_idempotent(self) -> None:
+        coordinator = self._coordinator()
+        coordinator._start_gps_polling()
+
+        coordinator._stop_gps_polling()
+        assert coordinator._unsub_gps is None
+        coordinator._stop_gps_polling()  # no error on a second stop
+        assert coordinator._start_gps_polling() is True
+
+    def test_applying_options_rearms_at_the_new_cadence(self) -> None:
+        coordinator = self._coordinator()
+        coordinator._start_gps_polling()
+        assert coordinator._polling_interval == timedelta(seconds=GPS_POLL_SECONDS)
+
+        coordinator.entry.options = {CONF_GPS_POLL_SECONDS: 10}
+        coordinator.async_apply_options()
+
+        assert coordinator._polling_interval == timedelta(seconds=10)
+        assert coordinator._unsub_gps is not None
+
+    def test_applying_options_while_idle_does_not_start_polling(self) -> None:
+        coordinator = self._coordinator()
+        coordinator.entry.options = {CONF_GPS_POLL_SECONDS: 10}
+
+        coordinator.async_apply_options()
+
+        # Nothing is running, so the new value waits for the next window.
+        assert coordinator._unsub_gps is None
+
+
 class TestPollGroups:
     def _coordinator(self, riders: dict[int, RiderState]) -> StopfinderCoordinator:
-        coordinator = StopfinderCoordinator(hass=None, entry=None)
+        coordinator = StopfinderCoordinator(hass=None, entry=ConfigEntry())
         coordinator.data = riders
         return coordinator
 

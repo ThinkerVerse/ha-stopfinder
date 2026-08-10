@@ -68,6 +68,9 @@ CONF_CLIENT_KEYS: Final = "client_keys"
 CONF_SF_CLIENT_ID: Final = "sf_client_id"
 CONF_SUBSCRIBER_ID: Final = "subscriber_id"
 
+# --- Options (per config entry, editable after setup) -------------------------
+CONF_GPS_POLL_SECONDS: Final = "gps_poll_seconds"
+
 # --- Behaviour tuning --------------------------------------------------------
 # Only poll /gps while a trip's window is open:
 #   [startTime - beforeTrip, finishTime + afterTrip]
@@ -76,14 +79,19 @@ DEFAULT_AFTER_TRIP_MIN: Final = 15
 
 # How often to re-evaluate which trips are active (open/close the poll window).
 SCHEDULE_TICK_SECONDS: Final = 60
+
 # How often to poll /gps while at least one trip is active.
 #
-# The app polls this endpoint on a 60s timer, and only as a *fallback* for when
-# its SignalR hub is not connected — 60s is the most traffic it ever generates
-# here. We match it rather than beat it: this endpoint is the one most likely to
-# get an account noticed, and being unobtrusive is worth more than sub-minute
-# resolution on a vehicle that reports every ~30-60s anyway.
-GPS_POLL_SECONDS: Final = 60
+# The app's own REST poll is 60s, but that is only the *fallback* it degrades to
+# when its SignalR hub is disconnected — normally it receives pushed vehicle
+# events as they happen, which is why the app's map moves more often than once a
+# minute. Being REST-only, matching 60s would make the app's worst case our
+# normal case, so we poll faster than that during a live trip and not at all
+# outside one. Tunable per config entry; the timer only exists while a window is
+# open.
+GPS_POLL_SECONDS: Final = 20
+GPS_POLL_SECONDS_MIN: Final = 10
+GPS_POLL_SECONDS_MAX: Final = 300
 # A fix older than this is treated as stale -> entity unavailable. Guards against
 # the endpoint returning a last-known/yesterday position outside a live run.
 # 300s is the app's own constant: it drops the bus from the map with the reason
