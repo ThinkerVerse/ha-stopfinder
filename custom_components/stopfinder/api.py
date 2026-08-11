@@ -255,6 +255,8 @@ class StopfinderApi:
         self._session = session
         self.base_uri: str | None = None
         self.client_keys: str = ""
+        # The clientId as the API spelled it, before lowercasing for the header.
+        self.client_id: str = ""
         self.sf_client_id: int | None = None
         self._token: str | None = None
 
@@ -374,8 +376,9 @@ class StopfinderApi:
         if not data:
             raise StopfinderError("apiversions returned no clients")
         first = data[0]
+        self.client_id = str(first.get("clientId", ""))
         # The app lowercases client ids when it builds X-Client-Keys.
-        self.client_keys = str(first.get("clientId", "")).lower()
+        self.client_keys = self.client_id.lower()
         self.sf_client_id = first.get("sfClientId") or first.get("id")
         if first.get("sfApiUri"):
             self.base_uri = str(first["sfApiUri"]).rstrip("/")

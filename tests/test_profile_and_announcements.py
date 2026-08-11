@@ -11,9 +11,14 @@ from datetime import date, datetime, timedelta, timezone
 
 from homeassistant.config_entries import ConfigEntry
 
-from sf.api import Announcement, _parse_announcements, _parse_students
+from sf.api import (
+    Announcement,
+    StopfinderApi,
+    _parse_announcements,
+    _parse_students,
+)
 from sf.const import CONF_CLIENT_KEYS, CONF_SUBSCRIBER_ID, EVENT_ANNOUNCEMENT
-from sf.coordinator import StopfinderCoordinator
+from sf.coordinator import StopfinderCoordinator, _title_case
 
 RIDER_ID = 1234567
 DAY = date(2026, 8, 11)
@@ -247,6 +252,7 @@ class _FakeApi:
     def __init__(self, responses: list[list[Announcement]]) -> None:
         self._responses = list(responses)
         self.calls = 0
+        self.client_id = "bartholomew"
         self.client_keys = "bartholomew"
 
     async def fetch_announcements(self):
@@ -296,11 +302,15 @@ class TestAnnouncementPolling:
         assert data["announcement_id"] == "999"
         assert coordinator.announcement.announcement_id == "999"
 
-    def test_district_falls_back_to_the_stored_key(self) -> None:
+    def test_district_is_cased_for_display(self) -> None:
         coordinator = _coordinator()
-        assert coordinator.district == "bartholomew"
-        coordinator.api.client_keys = ""
-        assert coordinator.district == "bartholomew"
+        assert coordinator.district == "Bartholomew"
+
+    def test_district_falls_back_to_the_stored_key(self) -> None:
+        """After a restart the entry's copy is all we have until identity loads."""
+        coordinator = _coordinator()
+        coordinator.api.client_id = ""
+        assert coordinator.district == "Bartholomew"
 
 
 class TestAnnouncementThrottle:
@@ -324,3 +334,32 @@ class TestAnnouncementThrottle:
 
 
 _NOW = datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc)
+
+
+class TestDistrictCasing:
+    def test_lowercase_keys_are_cased_for_reading(self) -> None:
+        assert _title_case("bartholomew") == "Bartholomew"
+
+    def test_acronyms_are_left_alone(self) -> None:
+        """Blind .title() would turn "BCSC" into "Bcsc"."""
+        assert _title_case("BCSC") == "BCSC"
+        assert _title_case("McTown") == "McTown"
+
+    def test_multiword_keys(self) -> None:
+        assert _title_case("north-central") == "North-Central"
+        assert _title_case("st. marys") == "St. Marys"
+
+    def test_multi_district_keys_are_cased_individually(self) -> None:
+        """A parent with children in two districts gets a comma-joined key."""
+        assert _title_case("bartholomew,BCSC") == "Bartholomew, BCSC"
+
+    def test_empty_stays_empty(self) -> None:
+        assert _title_case("") == ""
+
+    def test_the_header_still_goes_out_lowercase(self) -> None:
+        """Display casing must not leak into x-client-keys, which the app lowercases."""
+        api = StopfinderApi(session=None)
+        api.client_id = "BCSC"
+        api.client_keys = "bcsc"
+
+        assert api._base_headers()["x-client-keys"] == "bcsc"
