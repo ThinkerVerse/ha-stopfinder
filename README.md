@@ -95,9 +95,11 @@ marked diagnostic so they sit in their own panel rather than crowding the
 dashboard. "Bus stop" is the student's end of the route — the pickup on the way
 to school, the dropoff on the way home — which is the one that stays put.
 
-`District` is the API's district key (e.g. `bartholomew`), not a marketing name:
-no endpoint we call returns a friendlier one. The only `clientName` in the app
-comes from message threads.
+`District` is the API's district key cased for reading — `bartholomew` becomes
+`Bartholomew` — not a marketing name: no endpoint we call returns a friendlier
+one, and the only `clientName` in the app comes from message threads. A key that
+already carries capitals (an acronym like `BCSC`) is left alone. This is display
+only; `x-client-keys` still goes out lowercase, as the app sends it.
 
 ### Account entities (one device for the subscription, not per student)
 
@@ -320,7 +322,7 @@ flow exports, APKs, and source maps.
 
 ```bash
 # after committing changes and bumping manifest.json "version"
-git tag v1.2.0
+git tag v1.2.1
 git push origin main --tags
 # then create a GitHub Release from that tag; HACS will offer it as an update
 ```

@@ -165,12 +165,16 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
 
     @property
     def district(self) -> str:
-        """The district key the API is scoped to, e.g. "bartholomew".
+        """The district the API is scoped to, tidied for display.
 
-        There is no friendlier name available: the only `clientName` in the app
-        comes from message threads, not from any endpoint we call.
+        There is no friendly district name to be had: the only `clientName` in
+        the app comes from message threads, not from any endpoint we call. So
+        this is the district key ("bartholomew") cased for reading
+        ("Bartholomew"). Display only — `x-client-keys` still goes out lowercase
+        from api.client_keys.
         """
-        return self.api.client_keys or self.entry.data.get(CONF_CLIENT_KEYS, "")
+        raw = self.api.client_id or self.entry.data.get(CONF_CLIENT_KEYS, "")
+        return _title_case(raw)
 
     @property
     def _announcement_poll_interval(self) -> timedelta:
@@ -574,6 +578,20 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("GPS poll failed for %s: %s", group, err)
         return None
+
+
+def _title_case(value: str) -> str:
+    """Case a district key for display.
+
+    Only touches keys that arrive entirely lowercase, so a district whose id is
+    an acronym ("BCSC") is left as it is rather than mangled into "Bcsc".
+    Comma-separated keys — what a multi-district parent gets — are cased
+    individually.
+    """
+    if not value:
+        return ""
+    parts = [part.strip() for part in value.split(",")]
+    return ", ".join(part.title() if part.islower() else part for part in parts)
 
 
 def _soonest(trips: list[Trip], attr: str, now: datetime) -> Trip | None:
