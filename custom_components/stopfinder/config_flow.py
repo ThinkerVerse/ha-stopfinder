@@ -13,6 +13,10 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import StopfinderApi, StopfinderAuthError, StopfinderError, Tokens
 from .const import (
+    ANNOUNCEMENT_POLL_MINUTES,
+    ANNOUNCEMENT_POLL_MINUTES_MAX,
+    ANNOUNCEMENT_POLL_MINUTES_MIN,
+    CONF_ANNOUNCEMENT_POLL_MINUTES,
     CONF_BASE_URI,
     CONF_CLIENT_KEYS,
     CONF_DEVICE_ID,
@@ -199,8 +203,10 @@ class StopfinderOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data=user_input)
 
         entry = self.hass.config_entries.async_get_entry(self._entry_id)
-        current = (entry.options if entry else {}).get(
-            CONF_GPS_POLL_SECONDS, GPS_POLL_SECONDS
+        options = entry.options if entry else {}
+        gps_current = options.get(CONF_GPS_POLL_SECONDS, GPS_POLL_SECONDS)
+        announcement_current = options.get(
+            CONF_ANNOUNCEMENT_POLL_MINUTES, ANNOUNCEMENT_POLL_MINUTES
         )
 
         return self.async_show_form(
@@ -208,11 +214,20 @@ class StopfinderOptionsFlow(config_entries.OptionsFlow):
             data_schema=vol.Schema(
                 {
                     vol.Required(
-                        CONF_GPS_POLL_SECONDS, default=current
+                        CONF_GPS_POLL_SECONDS, default=gps_current
                     ): vol.All(
                         vol.Coerce(int),
                         vol.Range(min=GPS_POLL_SECONDS_MIN, max=GPS_POLL_SECONDS_MAX),
-                    )
+                    ),
+                    vol.Required(
+                        CONF_ANNOUNCEMENT_POLL_MINUTES, default=announcement_current
+                    ): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(
+                            min=ANNOUNCEMENT_POLL_MINUTES_MIN,
+                            max=ANNOUNCEMENT_POLL_MINUTES_MAX,
+                        ),
+                    ),
                 }
             ),
         )
