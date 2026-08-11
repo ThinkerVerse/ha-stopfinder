@@ -5,6 +5,8 @@ Live position comes from GET /gps?groupName=... The coordinator:
     full re-login only if the refresh token is rejected);
   * refreshes the day's roster and re-evaluates active trips on a slow tick;
   * while >=1 trip is active, polls /gps on a fast tick and pushes positions;
+  * while >=1 trip is active, also refreshes geo-alert notifications on the slow
+    tick, raising an event for each alert it has not seen before;
   * outside every trip window, does no GPS polling at all.
 
 Availability is derived from fix freshness — the /gps payload has no status
@@ -25,6 +27,7 @@ from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import (
+    GeoAlert,
     GpsFix,
     StopfinderApi,
     StopfinderAuthError,
@@ -37,8 +40,11 @@ from .const import (
     CONF_GPS_POLL_SECONDS,
     CONF_PASSWORD,
     CONF_REFRESH_TOKEN,
+    CONF_SUBSCRIBER_ID,
     CONF_USERNAME,
+    DEFAULT_LANGUAGE,
     DOMAIN,
+    EVENT_GEO_ALERT,
     GPS_NO_VEHICLE,
     GPS_NOT_AVAILABLE,
     GPS_POLL_SECONDS,
@@ -59,6 +65,7 @@ class RiderState:
     schedule: StudentSchedule
     active_trip: Trip | None = None
     fix: GpsFix | None = None
+    geo_alert: GeoAlert | None = None
 
     @property
     def rider_id(self) -> int:
@@ -106,6 +113,8 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         self._unsub_gps = None
         self._polling_interval: timedelta | None = None
         self._auth_failed = False
+        self._seen_geo_alerts: set[str] = set()
+        self._geo_alerts_primed = False
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -129,6 +138,11 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         self._stop_gps_polling()
 
     # -- poll cadence ---------------------------------------------------------
+
+    @property
+    def _language(self) -> str:
+        """Language for geo-alert text; the app sends the subscriber's own."""
+        return getattr(self.hass.config, "language", None) or DEFAULT_LANGUAGE
 
     @property
     def gps_poll_interval(self) -> timedelta:
@@ -298,6 +312,105 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         else:
             self._stop_gps_polling()
 
+        # Geo alerts ride this tick: the app refreshes them every 60s too. Only
+        # while a trip is running, since that is when a bus can cross a zone.
+        if _any_active_trip(self.data):
+            try:
+                await self._async_poll_geo_alerts()
+            except ConfigEntryAuthFailed:
+                self._handle_auth_failure()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Geo alert poll failed: %s", err)
+
+    # -- geo alerts -----------------------------------------------------------
+
+    def _geo_alert_requests(self) -> list[dict[str, int]]:
+        """Build the app's payload: one entry per rider/trip for today.
+
+        The app skips riders with no dataSourceId or no trips, and sends every
+        trip rather than just the running one — so an alert that fires late in a
+        window is still attributed to the right trip.
+        """
+        subscriber_id = self.entry.data.get(CONF_SUBSCRIBER_ID)
+        if subscriber_id is None:
+            return []
+        requests: list[dict[str, int]] = []
+        for rider in (self.data or {}).values():
+            schedule = rider.schedule
+            if not schedule.data_source_id or not schedule.trips:
+                continue
+            for trip in schedule.trips:
+                requests.append(
+                    {
+                        "riderId": schedule.rider_id,
+                        "subscriberId": subscriber_id,
+                        "tripId": trip.trip_id,
+                        "dataSourceId": schedule.data_source_id,
+                    }
+                )
+        return requests
+
+    async def _async_poll_geo_alerts(self) -> None:
+        """Fetch geo alerts and raise an event for any we have not seen.
+
+        The endpoint returns the latest alert per rider/trip on every call, so
+        without deduping on the alert id an automation would re-fire each minute.
+        The first poll only primes that set: a restart should not replay an alert
+        that fired before Home Assistant came up.
+        """
+        requests = self._geo_alert_requests()
+        if not requests:
+            return
+
+        subscriber_id = self.entry.data[CONF_SUBSCRIBER_ID]
+        try:
+            alerts = await self.api.fetch_geo_alerts(
+                subscriber_id, requests, self._language
+            )
+        except StopfinderAuthError:
+            await self._ensure_token()
+            alerts = await self.api.fetch_geo_alerts(
+                subscriber_id, requests, self._language
+            )
+
+        priming = not self._geo_alerts_primed
+        self._geo_alerts_primed = True
+
+        changed = False
+        for alert in alerts:
+            rider = (self.data or {}).get(alert.rider_id)
+            if rider is None:
+                continue
+            if _is_newer(alert, rider.geo_alert):
+                rider.geo_alert = alert
+                changed = True
+            if alert.alert_id in self._seen_geo_alerts:
+                continue
+            self._seen_geo_alerts.add(alert.alert_id)
+            if not priming:
+                self._fire_geo_alert_event(rider, alert)
+
+        if changed:
+            self.async_update_listeners()
+
+    def _fire_geo_alert_event(self, rider: RiderState, alert: GeoAlert) -> None:
+        self.hass.bus.async_fire(
+            EVENT_GEO_ALERT,
+            {
+                "entry_id": self.entry.entry_id,
+                "rider_id": alert.rider_id,
+                "student": f"{rider.schedule.first_name} "
+                f"{rider.schedule.last_name}".strip(),
+                "trip_id": alert.trip_id,
+                "zone": alert.zone_name,
+                "subject": alert.subject,
+                "message": alert.body,
+                "alert_type": alert.alert_type,
+                "sent_on": alert.sent_on.isoformat() if alert.sent_on else None,
+                "alert_id": alert.alert_id,
+            },
+        )
+
     # -- gps poll -------------------------------------------------------------
 
     def _groups_to_poll(self) -> dict[str, list[RiderState]]:
@@ -350,6 +463,21 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("GPS poll failed for %s: %s", group, err)
         return None
+
+
+def _any_active_trip(data: dict[int, RiderState] | None) -> bool:
+    return any(rider.active_trip for rider in (data or {}).values())
+
+
+def _is_newer(alert: GeoAlert, current: GeoAlert | None) -> bool:
+    """Whether `alert` should replace what a rider is already showing."""
+    if current is None:
+        return True
+    if alert.alert_id == current.alert_id:
+        return False
+    if alert.sent_on and current.sent_on:
+        return alert.sent_on >= current.sent_on
+    return True
 
 
 def _active_trip(trips: list[Trip], now: datetime) -> Trip | None:

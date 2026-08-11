@@ -55,6 +55,9 @@
       },
       "trip": {
         "name": "Active trip"
+      },
+      "geo_alert": {
+        "name": "Last geo alert"
       }
     }
   }

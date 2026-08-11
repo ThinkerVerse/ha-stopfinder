@@ -33,6 +33,8 @@ PATH_APIVERSIONS: Final = "/systems/apiversions"
 PATH_SUBSCRIBER: Final = "/action/subscribers/current"
 PATH_STUDENTS: Final = "/students"
 PATH_GPS: Final = "/gps"              # GET /gps?groupName={clientId}_{dataSourceId}_{busNumber}
+# POST /GeoAlertNotifications/{subscriberId}?language=xx
+PATH_GEO_ALERTS: Final = "/GeoAlertNotifications/"
 
 # --- Derived GPS status (the /gps payload has NO status field) ----------------
 # The app derives status client-side too, and writes it onto the trip object as
@@ -97,5 +99,14 @@ GPS_POLL_SECONDS_MAX: Final = 300
 # 300s is the app's own constant: it drops the bus from the map with the reason
 # "Has not received vehicle events in 5 minutes".
 GPS_STALE_AFTER_SECONDS: Final = 300
+
+# --- Geo alerts ---------------------------------------------------------------
+# The app refreshes these on interval(4 * CACHE_LIFETIME_MINUTES * 1000) with
+# CACHE_LIFETIME_MINUTES = 15, i.e. every 60s — the same cadence as our schedule
+# tick, which is where the poll is hung.
+DEFAULT_LANGUAGE: Final = "en"
+
+# Fired on the HA event bus when a geo alert we have not seen before arrives.
+EVENT_GEO_ALERT: Final = "stopfinder_geo_alert"
 
 PLATFORMS: Final = ["device_tracker", "sensor"]

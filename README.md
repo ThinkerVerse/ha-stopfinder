@@ -21,7 +21,10 @@ uses.
 4. **Roster** — `GET {base}/students?dateStart&dateEnd` gives each student's
    trips, stops, bus number, `dataSourceId`, `timeZoneMinutes`, and the
    before/after padding that defines the route window.
-5. **Live position** — `GET {base}/gps?groupName={clientId}_{dataSourceId}_{busNumber}`
+5. **Geo alerts** — `POST {base}/GeoAlertNotifications/{subscriberId}?language=xx`
+   with one `{riderId, subscriberId, tripId, dataSourceId}` entry per rider/trip
+   for today, returning the latest notification for each.
+6. **Live position** — `GET {base}/gps?groupName={clientId}_{dataSourceId}_{busNumber}`
    returns `{latitude, longitude, timestamp}`. The coordinator polls this every
    10s (configurable) while a trip window is open. Outside a window the timer
    does not exist at all, so nothing is requested.
@@ -74,6 +77,54 @@ goal, the hub is the way — the details above are the map.
 - **Bus number** — current `busNumber`; a separate entity because substitutions
   change it (useful to alert on).
 - **Active trip** — trip name (also encodes AM/PM and direction).
+- **Last geo alert** — timestamp of the most recent geo-alert notification for
+  that student, with the zone name, subject, message, trip and alert id as
+  attributes. Unknown until one fires.
+
+## Geo alerts
+
+Geo alerts are the zones you draw in the Stopfinder app ("tell me when the bus
+reaches Spring Hill"). The integration reads the notifications those zones
+produce — it does not create or edit the zones themselves.
+
+Alongside the sensor, each newly seen alert raises a **`stopfinder_geo_alert`**
+event, which is the better automation trigger:
+
+```yaml
+automation:
+  - alias: Bus reached the neighbourhood
+    triggers:
+      - trigger: event
+        event_type: stopfinder_geo_alert
+        event_data:
+          zone: Spring Hill
+    actions:
+      - action: notify.mobile_app
+        data:
+          message: "{{ trigger.event.data.message }}"
+```
+
+Event data: `entry_id`, `rider_id`, `student`, `trip_id`, `zone`, `subject`,
+`message`, `alert_type`, `sent_on`, `alert_id`.
+
+Two behaviours worth knowing:
+
+- **The endpoint repeats itself.** `POST /GeoAlertNotifications/{subscriberId}`
+  returns the *latest* alert per (rider, trip) on every call, so alerts are
+  deduplicated on their id — otherwise an automation would fire once a minute
+  for as long as the alert stood.
+- **The first poll after a restart only primes that set.** An alert that fired
+  while Home Assistant was down populates the sensor but does not raise an
+  event, so a restart cannot replay yesterday's arrival.
+
+Polling happens on the 60s schedule tick — the app's own cadence for this call
+(`interval(4 * CACHE_LIFETIME_MINUTES * 1000)`, where `CACHE_LIFETIME_MINUTES` is
+15) — and only while a trip is running, since that is when a bus can cross a
+zone.
+
+`alertType` is passed through verbatim as an attribute rather than interpreted:
+the app writes it (`false` for a push-delivered alert) but never reads it back,
+so the bundle gives no basis for naming its two states.
 
 ## Upgrading to 1.0.0
 
@@ -96,7 +147,8 @@ therefore gated on age (`GPS_STALE_AFTER_SECONDS`, 300). That is not a guess:
 *"Has not received vehicle events in 5 minutes"*.
 
 **Poll cadence, and why it isn't 60s.** The app's REST poll of `/gps` is on a
-60s timer — `interval(60000)`, the only polling cadence in the whole bundle — but
+60s timer — `interval(60000)`; in fact every REST poll in the app lands on 60s,
+the geo-alert refresh included, whether written as a literal or computed — but
 that is the *fallback* half of `iif(connected, signalRStream, polling)`. Normally
 the app receives pushed vehicle events over its SignalR hub as they happen, which
 is why its map moves more often than once a minute. Being REST-only, adopting 60s
@@ -142,6 +194,10 @@ than failing silently.
   `v2.5`.
 - **Scan events are not implemented.** `GET {base}/action/scannedrecords/current?date=`
   exposes actual scan-on / scan-off records, i.e. whether the child boarded.
+- **Geo alert zones are read-only here.** The notifications are surfaced, but the
+  zones themselves are managed in the app; `/geoalerts` (GET/POST/DELETE),
+  `/geoalerts/unique` and `/geoalertsettings/mapsettings/` would be needed to
+  create or edit them from Home Assistant.
 - **Speed / heading** are genuinely absent — not just from `/gps`, but from the
   app, whose only `heading` handling is for the phone's own location arrow.
 - **Server-side version gating exists.** The app sends
@@ -181,9 +237,10 @@ pip install pytest aiohttp
 python3 -m pytest tests/ -q
 ```
 
-The suite covers roster and `/gps` parsing, route-window maths (including
-`adjustMinutes`), the derived GPS-status matrix, request deduplication, and an
-import smoke test for the whole package.
+The suite covers roster, `/gps` and geo-alert parsing, route-window maths
+(including `adjustMinutes`), the derived GPS-status matrix, request
+deduplication, geo-alert priming and event dedupe, and an import smoke test for
+the whole package.
 
 ## Scrub before publishing
 
@@ -195,7 +252,7 @@ flow exports, APKs, and source maps.
 
 ```bash
 # after committing changes and bumping manifest.json "version"
-git tag v1.0.0
+git tag v1.1.0
 git push origin main --tags
 # then create a GitHub Release from that tag; HACS will offer it as an update
 ```

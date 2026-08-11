@@ -169,6 +169,7 @@ def _install_homeassistant_stubs() -> None:
 
     class SensorDeviceClass(Enum):
         ENUM = "enum"
+        TIMESTAMP = "timestamp"
 
     class SensorEntity:
         pass
