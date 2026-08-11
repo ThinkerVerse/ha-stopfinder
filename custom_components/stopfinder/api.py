@@ -33,6 +33,7 @@ from .const import (
     AUTH_FAILURE_STATUSES,
     DEFAULT_LANGUAGE,
     DISCOVERY_URL,
+    PATH_ANNOUNCEMENTS,
     PATH_APIVERSIONS,
     GPS_STALE_AFTER_SECONDS,
     PATH_GEO_ALERTS,
@@ -113,6 +114,28 @@ class GeoAlert:
 
 
 @dataclass
+class Announcement:
+    """A district-wide notice from GET /announcementssent.
+
+    These are the "bus 233 running 20 minutes late" messages. The endpoint
+    returns the subscriber's whole history — an announcement from last school
+    year is a perfectly normal response — so `sent_on` is what separates a live
+    notice from an archived one, not the mere presence of a record.
+    """
+
+    announcement_id: str
+    subject: str
+    body: str
+    name: str
+    sent_on: datetime | None
+    opened_on: datetime | None
+    sent_by_name: str
+    read: bool
+    archived: bool
+    raw: dict[str, Any]
+
+
+@dataclass
 class Trip:
     """One AM or PM trip for a student on a given day."""
 
@@ -129,6 +152,11 @@ class Trip:
     dropoff_stop_name: str
     before_trip_min: int
     after_trip_min: int
+    # When the bus reaches *this student's* stop, as opposed to start/finish
+    # which bracket the whole route. Naive district-local like the rest: the app
+    # runs all four through the same conversion.
+    pickup_time: datetime | None = None
+    dropoff_time: datetime | None = None
     # Per-trip shift the app's isTripRunning() applies to both ends of the
     # window *before* the student's before/after padding. A district that sets it
     # (it can even push a stop across midnight, which the app renders as
@@ -159,6 +187,20 @@ class Trip:
         return self.window_start <= now <= self.window_end
 
     @property
+    def adjusted_pickup_time(self) -> datetime | None:
+        """Pickup time with adjustMinutes applied, as the app's display does."""
+        if self.pickup_time is None:
+            return None
+        return self.pickup_time + timedelta(minutes=self.adjust_minutes)
+
+    @property
+    def adjusted_dropoff_time(self) -> datetime | None:
+        """Dropoff time with adjustMinutes applied."""
+        if self.dropoff_time is None:
+            return None
+        return self.dropoff_time + timedelta(minutes=self.adjust_minutes)
+
+    @property
     def has_vehicle(self) -> bool:
         """A trip with no bus assigned can't be tracked.
 
@@ -180,7 +222,26 @@ class StudentSchedule:
     data_source_id: int
     display_vehicle_on_map: bool
     tz_offset_minutes: float
+    grade: str = ""
     trips: list[Trip] = field(default_factory=list)
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.first_name} {self.last_name}".strip()
+
+    @property
+    def home_stop(self) -> str:
+        """The stop at the student's end of the route.
+
+        It is the pickup on the way to school and the dropoff on the way back,
+        so take whichever the day's trips provide. Unlike the school end, this
+        is the one that stays put across the year.
+        """
+        for trip in self.trips:
+            name = trip.pickup_stop_name if trip.to_school else trip.dropoff_stop_name
+            if name:
+                return name
+        return ""
 
     def group_name(self, trip: Trip) -> str:
         """Vehicle-hub group: {clientId}_{dataSourceId}_{busNumber}."""
@@ -380,6 +441,22 @@ class StopfinderApi:
             data = await resp.json()
         return _parse_geo_alerts(data)
 
+    # -- announcements --------------------------------------------------------
+
+    async def fetch_announcements(self) -> list[Announcement]:
+        """Fetch district announcements, newest first.
+
+        Account-wide rather than per-student, and unfiltered: read and archived
+        notices come back too, so the caller decides what counts as current.
+        """
+        async with self._session.get(
+            f"{self.base_uri}{PATH_ANNOUNCEMENTS}", headers=self._auth_headers()
+        ) as resp:
+            self._raise_for_auth(resp)
+            resp.raise_for_status()
+            data = await resp.json()
+        return _parse_announcements(data)
+
     # -- live position --------------------------------------------------------
 
     async def fetch_gps(self, group_name: str) -> GpsFix | None:
@@ -485,6 +562,39 @@ def _parse_geo_alerts(data: list[dict[str, Any]] | None) -> list[GeoAlert]:
     return out
 
 
+def _parse_announcements(data: list[dict[str, Any]] | None) -> list[Announcement]:
+    """Parse announcements, newest first.
+
+    Timestamps are UTC, as with geo alerts. A capture proves it: an announcement
+    whose body read "0745 11/10/2025" carried sentOn 12:46 — 07:46 in that
+    UTC-5 district, matching its own text to the minute.
+    """
+    out: list[Announcement] = []
+    for item in data or []:
+        # Both `id` and `Id` are present; they are distinct JSON keys.
+        announcement_id = item.get("id") or item.get("Id")
+        if announcement_id in (None, ""):
+            continue  # without an id we cannot tell a repeat from a new notice
+        out.append(
+            Announcement(
+                announcement_id=str(announcement_id),
+                subject=item.get("subject") or item.get("name") or "",
+                body=item.get("body") or "",
+                name=item.get("name") or "",
+                sent_on=_parse_utc(item.get("sentOn")),
+                opened_on=_parse_utc(item.get("openedOn")),
+                sent_by_name=item.get("sentByName") or "",
+                read=bool(item.get("read")),
+                archived=bool(item.get("archived")),
+                raw=item,
+            )
+        )
+    # Undated notices sort last rather than blowing up on a None comparison.
+    undated = datetime.min.replace(tzinfo=timezone.utc)
+    out.sort(key=lambda a: a.sent_on or undated, reverse=True)
+    return out
+
+
 def _as_int(value: Any) -> int:
     """Coerce an id that may arrive as a number or a string."""
     try:
@@ -550,6 +660,8 @@ def _parse_students(data: list[dict], day: date) -> list[StudentSchedule]:
                         before_trip_min=int(sched.get("beforeTrip", 15)),
                         after_trip_min=int(sched.get("afterTrip", 15)),
                         adjust_minutes=int(t.get("adjustMinutes") or 0),
+                        pickup_time=_parse_dt(t.get("pickUpTime"), tz_min),
+                        dropoff_time=_parse_dt(t.get("dropOffTime"), tz_min),
                     )
                 )
             out.append(
@@ -558,6 +670,7 @@ def _parse_students(data: list[dict], day: date) -> list[StudentSchedule]:
                     first_name=sched.get("firstName", ""),
                     last_name=sched.get("lastName", ""),
                     school=sched.get("school", ""),
+                    grade=str(sched.get("grade") or ""),
                     client_id=sched.get("clientId", 0),
                     data_source_id=sched.get("dataSourceId", 0),
                     display_vehicle_on_map=bool(sched.get("displayVehicleOnMap", True)),

@@ -32,9 +32,10 @@
     "step": {
       "init": {
         "title": "Stopfinder options",
-        "description": "How often to check the bus position while a trip is running. Nothing is polled outside a trip window.",
+        "description": "How often to check the bus position while a trip is running (nothing is polled outside a trip window), and how often to check for district announcements.",
         "data": {
-          "gps_poll_seconds": "Seconds between position checks"
+          "gps_poll_seconds": "Seconds between position checks",
+          "announcement_poll_minutes": "Minutes between announcement checks"
         }
       }
     }
@@ -58,6 +59,33 @@
       },
       "geo_alert": {
         "name": "Last geo alert"
+      },
+      "next_pickup": {
+        "name": "Next pickup"
+      },
+      "next_dropoff": {
+        "name": "Next dropoff"
+      },
+      "student_name": {
+        "name": "Student"
+      },
+      "grade": {
+        "name": "Grade"
+      },
+      "school": {
+        "name": "School"
+      },
+      "district": {
+        "name": "District"
+      },
+      "home_stop": {
+        "name": "Bus stop"
+      },
+      "announcement": {
+        "name": "Announcement"
+      },
+      "announcement_time": {
+        "name": "Announcement time"
       }
     }
   }

@@ -1,8 +1,8 @@
 # Home Assistant — Stopfinder (Transfinder) custom integration
 
-Tracks your child's school bus as a `device_tracker`, plus GPS-status, bus-number,
-and active-trip sensors, using the same undocumented Stopfinder API the mobile app
-uses.
+Tracks your child's school bus as a `device_tracker`, with sensors for stop times,
+GPS status, bus number, geo alerts, district announcements and the student's
+profile — using the same undocumented Stopfinder API the mobile app uses.
 
 > Reverse-engineered from observed traffic and the app bundle. No official API
 > exists. Automated access may violate Stopfinder's ToS — the realistic risk is
@@ -24,7 +24,9 @@ uses.
 5. **Geo alerts** — `POST {base}/GeoAlertNotifications/{subscriberId}?language=xx`
    with one `{riderId, subscriberId, tripId, dataSourceId}` entry per rider/trip
    for today, returning the latest notification for each.
-6. **Live position** — `GET {base}/gps?groupName={clientId}_{dataSourceId}_{busNumber}`
+6. **Announcements** — `GET {base}/announcementssent` returns district notices,
+   newest first, on their own slow clock.
+7. **Live position** — `GET {base}/gps?groupName={clientId}_{dataSourceId}_{busNumber}`
    returns `{latitude, longitude, timestamp}`. The coordinator polls this every
    10s (configurable) while a trip window is open. Outside a window the timer
    does not exist at all, so nothing is requested.
@@ -80,6 +82,70 @@ goal, the hub is the way — the details above are the map.
 - **Last geo alert** — timestamp of the most recent geo-alert notification for
   that student, with the zone name, subject, message, trip and alert id as
   attributes. Unknown until one fires.
+- **Next pickup** / **Next dropoff** — timestamps for when the bus reaches *this
+  student's* stop, from `pickUpTime` / `dropOffTime`, with the stop name and trip
+  as attributes. These are not the same as the route window: the route may start
+  at 07:21 while your stop is at 07:40. Unknown once the day's last trip has
+  passed, since the roster we hold covers today only.
+
+### Profile (diagnostic, changes once or twice a school year)
+
+**Student**, **Grade**, **School**, **District** and **Bus stop**. These are
+marked diagnostic so they sit in their own panel rather than crowding the
+dashboard. "Bus stop" is the student's end of the route — the pickup on the way
+to school, the dropoff on the way home — which is the one that stays put.
+
+`District` is the API's district key (e.g. `bartholomew`), not a marketing name:
+no endpoint we call returns a friendlier one. The only `clientName` in the app
+comes from message threads.
+
+### Account entities (one device for the subscription, not per student)
+
+- **Announcement** — subject of the most recent district notice, with the full
+  message, sender, read/archived state and id as attributes.
+- **Announcement time** — when it was sent. See [Announcements](#announcements).
+
+## Announcements
+
+District-wide notices, e.g. *"233 running 20 mins late - Bus 242"*. Rare, but
+they are how a bus substitution reaches you.
+
+`GET /announcementssent` returns the subscriber's **whole history**, so a notice
+from last school year is a perfectly normal response. Two consequences shape the
+design:
+
+- **Age, not presence, is what makes a notice current.** That is why
+  `Announcement time` is a separate timestamp entity: an automation can gate on
+  it rather than firing on whatever happens to be newest.
+- **The `stopfinder_announcement` event only fires for ids not seen before**, and
+  the first poll after a restart only primes that set — so last year's notice
+  never replays.
+
+```yaml
+automation:
+  - alias: Fresh bus announcement
+    triggers:
+      - trigger: event
+        event_type: stopfinder_announcement
+    conditions:
+      # Belt and braces: ignore anything sent more than a day ago.
+      - condition: template
+        value_template: >
+          {{ (now() - (trigger.event.data.sent_on | as_datetime)).days < 1 }}
+    actions:
+      - action: notify.mobile_app
+        data:
+          title: "{{ trigger.event.data.subject }}"
+          message: "{{ trigger.event.data.message }}"
+```
+
+Event data: `entry_id`, `announcement_id`, `subject`, `message`, `sent_on`,
+`sent_by`, `read`, `archived`.
+
+Polled every 15 minutes by default (**Configure** → *Minutes between announcement
+checks*, 5–1440), independent of trip windows — a "running late" notice matters
+most *before* the bus is due. The app has no cadence to copy here: it refetches
+on app resume and on UI navigation, never on a timer.
 
 ## Geo alerts
 
@@ -106,6 +172,8 @@ automation:
 
 Event data: `entry_id`, `rider_id`, `student`, `trip_id`, `zone`, `subject`,
 `message`, `alert_type`, `sent_on`, `alert_id`.
+
+The zones themselves are not read from the API — see known gaps.
 
 Two behaviours worth knowing:
 
@@ -237,7 +305,7 @@ pip install pytest aiohttp
 python3 -m pytest tests/ -q
 ```
 
-The suite covers roster, `/gps` and geo-alert parsing, route-window maths
+The suite covers roster, `/gps`, geo-alert and announcement parsing, route-window maths
 (including `adjustMinutes`), the derived GPS-status matrix, request
 deduplication, geo-alert priming and event dedupe, and an import smoke test for
 the whole package.
@@ -252,7 +320,7 @@ flow exports, APKs, and source maps.
 
 ```bash
 # after committing changes and bumping manifest.json "version"
-git tag v1.1.0
+git tag v1.2.0
 git push origin main --tags
 # then create a GitHub Release from that tag; HACS will offer it as an update
 ```

@@ -7,6 +7,8 @@ Live position comes from GET /gps?groupName=... The coordinator:
   * while >=1 trip is active, polls /gps on a fast tick and pushes positions;
   * while >=1 trip is active, also refreshes geo-alert notifications on the slow
     tick, raising an event for each alert it has not seen before;
+  * refreshes district announcements on their own slow clock, independent of
+    trips, raising an event for each notice it has not seen before;
   * outside every trip window, does no GPS polling at all.
 
 Availability is derived from fix freshness — the /gps payload has no status
@@ -27,6 +29,7 @@ from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import (
+    Announcement,
     GeoAlert,
     GpsFix,
     StopfinderApi,
@@ -36,6 +39,9 @@ from .api import (
     Trip,
 )
 from .const import (
+    ANNOUNCEMENT_POLL_MINUTES,
+    CONF_ANNOUNCEMENT_POLL_MINUTES,
+    CONF_CLIENT_KEYS,
     CONF_DEVICE_ID,
     CONF_GPS_POLL_SECONDS,
     CONF_PASSWORD,
@@ -44,6 +50,7 @@ from .const import (
     CONF_USERNAME,
     DEFAULT_LANGUAGE,
     DOMAIN,
+    EVENT_ANNOUNCEMENT,
     EVENT_GEO_ALERT,
     GPS_NO_VEHICLE,
     GPS_NOT_AVAILABLE,
@@ -66,10 +73,23 @@ class RiderState:
     active_trip: Trip | None = None
     fix: GpsFix | None = None
     geo_alert: GeoAlert | None = None
+    district: str = ""
 
     @property
     def rider_id(self) -> int:
         return self.schedule.rider_id
+
+    def next_pickup(self, now: datetime) -> Trip | None:
+        """The next trip that has yet to reach this student's stop today.
+
+        Once the last pickup of the day has passed this is None: the roster we
+        hold covers today only, so there is no honest answer for tomorrow.
+        """
+        return _soonest(self.schedule.trips, "adjusted_pickup_time", now)
+
+    def next_dropoff(self, now: datetime) -> Trip | None:
+        """The next trip that has yet to drop this student off today."""
+        return _soonest(self.schedule.trips, "adjusted_dropoff_time", now)
 
     def gps_status(self, now: datetime) -> str | None:
         """Derive the app's `gpsStatus` for this rider.
@@ -115,6 +135,10 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         self._auth_failed = False
         self._seen_geo_alerts: set[str] = set()
         self._geo_alerts_primed = False
+        self.announcement: Announcement | None = None
+        self._seen_announcements: set[str] = set()
+        self._announcements_primed = False
+        self._announcements_polled_at: datetime | None = None
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -138,6 +162,22 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         self._stop_gps_polling()
 
     # -- poll cadence ---------------------------------------------------------
+
+    @property
+    def district(self) -> str:
+        """The district key the API is scoped to, e.g. "bartholomew".
+
+        There is no friendlier name available: the only `clientName` in the app
+        comes from message threads, not from any endpoint we call.
+        """
+        return self.api.client_keys or self.entry.data.get(CONF_CLIENT_KEYS, "")
+
+    @property
+    def _announcement_poll_interval(self) -> timedelta:
+        minutes = self.entry.options.get(
+            CONF_ANNOUNCEMENT_POLL_MINUTES, ANNOUNCEMENT_POLL_MINUTES
+        )
+        return timedelta(minutes=int(minutes))
 
     @property
     def _language(self) -> str:
@@ -280,6 +320,8 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
             new_data[sched.rider_id] = RiderState(
                 schedule=sched,
                 fix=prev.fix if prev else None,
+                geo_alert=prev.geo_alert if prev else None,
+                district=self.district,
             )
         self._schedule_day = date.today()
         self.async_set_updated_data(new_data)
@@ -321,6 +363,14 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
                 self._handle_auth_failure()
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("Geo alert poll failed: %s", err)
+
+        if self._announcements_due(now):
+            try:
+                await self._async_poll_announcements(now)
+            except ConfigEntryAuthFailed:
+                self._handle_auth_failure()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Announcement poll failed: %s", err)
 
     # -- geo alerts -----------------------------------------------------------
 
@@ -411,6 +461,67 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
             },
         )
 
+    # -- announcements --------------------------------------------------------
+
+    def _announcements_due(self, now: datetime) -> bool:
+        """Announcements have their own slow clock, independent of trips.
+
+        A "bus running late" notice is worth having before the window opens, so
+        this cannot be gated on an active trip the way geo alerts are.
+        """
+        if self._announcements_polled_at is None:
+            return True
+        return now - self._announcements_polled_at >= self._announcement_poll_interval
+
+    async def _async_poll_announcements(self, now: datetime) -> None:
+        """Refresh announcements, raising an event for any not seen before.
+
+        The endpoint returns the subscriber's whole history — an announcement
+        from last school year is a normal response — so the newest record is not
+        necessarily news. New ids raise the event; the first poll only primes.
+        """
+        try:
+            announcements = await self.api.fetch_announcements()
+        except StopfinderAuthError:
+            await self._ensure_token()
+            announcements = await self.api.fetch_announcements()
+        self._announcements_polled_at = now
+
+        priming = not self._announcements_primed
+        self._announcements_primed = True
+
+        latest = announcements[0] if announcements else None
+        if latest is not None and (
+            self.announcement is None
+            or latest.announcement_id != self.announcement.announcement_id
+        ):
+            self.announcement = latest
+            self.async_update_listeners()
+
+        for announcement in announcements:
+            if announcement.announcement_id in self._seen_announcements:
+                continue
+            self._seen_announcements.add(announcement.announcement_id)
+            if not priming:
+                self._fire_announcement_event(announcement)
+
+    def _fire_announcement_event(self, announcement: Announcement) -> None:
+        self.hass.bus.async_fire(
+            EVENT_ANNOUNCEMENT,
+            {
+                "entry_id": self.entry.entry_id,
+                "announcement_id": announcement.announcement_id,
+                "subject": announcement.subject,
+                "message": announcement.body,
+                "sent_on": (
+                    announcement.sent_on.isoformat() if announcement.sent_on else None
+                ),
+                "sent_by": announcement.sent_by_name,
+                "read": announcement.read,
+                "archived": announcement.archived,
+            },
+        )
+
     # -- gps poll -------------------------------------------------------------
 
     def _groups_to_poll(self) -> dict[str, list[RiderState]]:
@@ -463,6 +574,17 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("GPS poll failed for %s: %s", group, err)
         return None
+
+
+def _soonest(trips: list[Trip], attr: str, now: datetime) -> Trip | None:
+    """The trip with the earliest still-future value of `attr`."""
+    upcoming = [
+        trip for trip in trips
+        if getattr(trip, attr) is not None and getattr(trip, attr) >= now
+    ]
+    if not upcoming:
+        return None
+    return min(upcoming, key=lambda trip: getattr(trip, attr))
 
 
 def _any_active_trip(data: dict[int, RiderState] | None) -> bool:

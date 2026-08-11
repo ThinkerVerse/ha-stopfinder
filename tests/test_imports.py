@@ -88,3 +88,35 @@ def test_declared_sensor_states_have_translations() -> None:
         data = json.loads(path.read_text())
         states = data["entity"]["sensor"]["gps_status"]["state"]
         assert set(states) == set(const.GPS_STATUSES), path
+
+
+def test_every_sensor_translation_key_has_a_name() -> None:
+    """A translation_key with no entry renders as a blank entity name in HA."""
+    import json
+    from pathlib import Path
+
+    sensor = importlib.import_module("sf.sensor")
+    component = Path(__file__).resolve().parents[1] / "custom_components" / "stopfinder"
+
+    keys = {d.translation_key for d in sensor.SENSORS}
+    keys |= {d.translation_key for d in sensor.ANNOUNCEMENT_SENSORS}
+    assert None not in keys, "every sensor description needs a translation_key"
+
+    for path in (component / "strings.json", component / "translations" / "en.json"):
+        names = json.loads(path.read_text())["entity"]["sensor"]
+        missing = {k for k in keys if not names.get(k, {}).get("name")}
+        assert not missing, f"{path.name} is missing names for {sorted(missing)}"
+
+
+def test_options_schema_keys_have_labels() -> None:
+    """An option with no label shows its raw key in the options dialog."""
+    import json
+    from pathlib import Path
+
+    const = importlib.import_module("sf.const")
+    component = Path(__file__).resolve().parents[1] / "custom_components" / "stopfinder"
+
+    expected = {const.CONF_GPS_POLL_SECONDS, const.CONF_ANNOUNCEMENT_POLL_MINUTES}
+    for path in (component / "strings.json", component / "translations" / "en.json"):
+        labels = json.loads(path.read_text())["options"]["step"]["init"]["data"]
+        assert expected <= set(labels), path.name

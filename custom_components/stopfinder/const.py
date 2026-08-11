@@ -35,6 +35,7 @@ PATH_STUDENTS: Final = "/students"
 PATH_GPS: Final = "/gps"              # GET /gps?groupName={clientId}_{dataSourceId}_{busNumber}
 # POST /GeoAlertNotifications/{subscriberId}?language=xx
 PATH_GEO_ALERTS: Final = "/GeoAlertNotifications/"
+PATH_ANNOUNCEMENTS: Final = "/announcementssent"
 
 # --- Derived GPS status (the /gps payload has NO status field) ----------------
 # The app derives status client-side too, and writes it onto the trip object as
@@ -108,5 +109,17 @@ DEFAULT_LANGUAGE: Final = "en"
 
 # Fired on the HA event bus when a geo alert we have not seen before arrives.
 EVENT_GEO_ALERT: Final = "stopfinder_geo_alert"
+
+# --- Announcements ------------------------------------------------------------
+# District-wide notices ("bus 233 running 20 minutes late"). Rare, but the ones
+# that matter arrive in the morning, so they are polled on their own slow timer
+# rather than with the roster. The app has no cadence to copy: it refetches on
+# app resume and on UI navigation, never on an interval.
+ANNOUNCEMENT_POLL_MINUTES: Final = 15
+ANNOUNCEMENT_POLL_MINUTES_MIN: Final = 5
+ANNOUNCEMENT_POLL_MINUTES_MAX: Final = 1440
+CONF_ANNOUNCEMENT_POLL_MINUTES: Final = "announcement_poll_minutes"
+
+EVENT_ANNOUNCEMENT: Final = "stopfinder_announcement"
 
 PLATFORMS: Final = ["device_tracker", "sensor"]

@@ -77,6 +77,14 @@ def _install_homeassistant_stubs() -> None:
     config_entries.ConfigFlow = ConfigFlow
     config_entries.OptionsFlow = OptionsFlow
 
+    const_mod = _module("homeassistant.const")
+
+    class EntityCategory(Enum):
+        DIAGNOSTIC = "diagnostic"
+        CONFIG = "config"
+
+    const_mod.EntityCategory = EntityCategory
+
     core = _module("homeassistant.core")
 
     class HomeAssistant:
@@ -166,6 +174,7 @@ def _install_homeassistant_stubs() -> None:
         icon: str | None = None
         device_class: object | None = None
         options: list[str] | None = None
+        entity_category: object | None = None
 
     class SensorDeviceClass(Enum):
         ENUM = "enum"
