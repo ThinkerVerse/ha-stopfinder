@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -27,7 +28,23 @@ from .coordinator import RiderState, StopfinderCoordinator
 
 @dataclass(frozen=True, kw_only=True)
 class StopfinderSensorDescription(SensorEntityDescription):
-    value_fn: Callable[[RiderState], str | None]
+    value_fn: Callable[[RiderState], str | datetime | None]
+    attrs_fn: Callable[[RiderState], dict[str, Any]] | None = None
+
+
+def _geo_alert_attrs(s: RiderState) -> dict[str, Any]:
+    """Detail for the last geo alert, alongside its timestamp state."""
+    alert = s.geo_alert
+    if alert is None:
+        return {}
+    return {
+        "zone": alert.zone_name,
+        "subject": alert.subject,
+        "message": alert.body,
+        "trip_id": alert.trip_id,
+        "alert_type": alert.alert_type,
+        "alert_id": alert.alert_id,
+    }
 
 
 SENSORS: tuple[StopfinderSensorDescription, ...] = (
@@ -50,6 +67,14 @@ SENSORS: tuple[StopfinderSensorDescription, ...] = (
         translation_key="trip",
         icon="mdi:map-marker-path",
         value_fn=lambda s: (s.active_trip.name if s.active_trip else None),
+    ),
+    StopfinderSensorDescription(
+        key="geo_alert",
+        translation_key="geo_alert",
+        icon="mdi:map-marker-alert",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=lambda s: (s.geo_alert.sent_on if s.geo_alert else None),
+        attrs_fn=_geo_alert_attrs,
     ),
 )
 
@@ -100,8 +125,16 @@ class StopfinderSensor(CoordinatorEntity[StopfinderCoordinator], SensorEntity):
         )
 
     @property
-    def native_value(self) -> str | None:
+    def native_value(self) -> str | datetime | None:
         state = self._state
         if not state:
             return None
         return self.entity_description.value_fn(state)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        state = self._state
+        attrs_fn = self.entity_description.attrs_fn
+        if state is None or attrs_fn is None:
+            return {}
+        return attrs_fn(state)

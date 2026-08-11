@@ -31,9 +31,11 @@ from yarl import URL
 from .const import (
     APP_VERSION,
     AUTH_FAILURE_STATUSES,
+    DEFAULT_LANGUAGE,
     DISCOVERY_URL,
     PATH_APIVERSIONS,
     GPS_STALE_AFTER_SECONDS,
+    PATH_GEO_ALERTS,
     PATH_GPS,
     PATH_STUDENTS,
     PATH_SUBSCRIBER,
@@ -87,6 +89,27 @@ class GpsFix:
     def is_fresh(self, now: datetime | None = None, max_age: int = GPS_STALE_AFTER_SECONDS) -> bool:
         now = now or datetime.now(timezone.utc)
         return (now - self.fix_time).total_seconds() <= max_age
+
+
+@dataclass
+class GeoAlert:
+    """One geo-alert notification: the bus reaching a zone the user drew.
+
+    Returned by POST /GeoAlertNotifications/{subscriberId}, which reports the
+    most recent notification per (rider, trip) — so the same alert comes back on
+    every poll until a newer one replaces it. Callers dedupe on `alert_id`.
+    """
+
+    alert_id: str
+    rider_id: int
+    trip_id: int
+    zone_name: str      # `name`, e.g. the geofence the user drew
+    subject: str        # the notification title (the app puts the student here)
+    body: str           # the notification text
+    sent_on: datetime | None
+    created_at: datetime | None
+    alert_type: bool | None
+    raw: dict[str, Any]
 
 
 @dataclass
@@ -329,6 +352,34 @@ class StopfinderApi:
             data = await resp.json()
         return _parse_students(data, day)
 
+    # -- geo alert notifications ----------------------------------------------
+
+    async def fetch_geo_alerts(
+        self,
+        subscriber_id: int,
+        requests: list[dict[str, Any]],
+        language: str = DEFAULT_LANGUAGE,
+    ) -> list[GeoAlert]:
+        """Ask for the latest geo-alert notification per (rider, trip).
+
+        `requests` is the app's payload shape — one entry per rider/trip for
+        today, each `{riderId, subscriberId, tripId, dataSourceId}`. Entries with
+        nothing to report come back without a `geoAlertNotification` (or are
+        omitted entirely), and are skipped.
+        """
+        if not requests:
+            return []
+        url = URL(f"{self.base_uri}{PATH_GEO_ALERTS}{subscriber_id}").with_query(
+            {"language": language}
+        )
+        headers = self._auth_headers()
+        headers["content-type"] = "application/json"
+        async with self._session.post(url, headers=headers, json=requests) as resp:
+            self._raise_for_auth(resp)
+            resp.raise_for_status()
+            data = await resp.json()
+        return _parse_geo_alerts(data)
+
     # -- live position --------------------------------------------------------
 
     async def fetch_gps(self, group_name: str) -> GpsFix | None:
@@ -377,6 +428,69 @@ def _parse_dt(value: str | None, tz_offset_minutes: float) -> datetime | None:
     naive = datetime.fromisoformat(value)
     tz = timezone(timedelta(minutes=tz_offset_minutes))
     return naive.replace(tzinfo=tz)
+
+
+def _parse_utc(value: str | None) -> datetime | None:
+    """Parse a .NET timestamp from a geo-alert notification as UTC.
+
+    Unlike /students, whose times are naive district-local, these are UTC. In a
+    capture from a UTC-4 district the response's own `date:` header read
+    11:35:03 GMT against a `sentOn` of 11:30:12 — read as district-local that
+    would place the alert about four hours in the future, so it can only be UTC.
+
+    .NET also emits 7 fractional digits, one more than datetime accepts pre-3.11.
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        head, _, frac = value.partition(".")
+        if not frac:
+            return None
+        try:
+            parsed = datetime.fromisoformat(f"{head}.{frac[:6]}")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_geo_alerts(data: list[dict[str, Any]] | None) -> list[GeoAlert]:
+    """Parse the GeoAlertNotifications response into alerts worth reporting."""
+    out: list[GeoAlert] = []
+    for entry in data or []:
+        note = entry.get("geoAlertNotification")
+        if not note:
+            continue  # nothing has fired for this rider/trip yet
+        # The payload carries both `id` and `Id`; they are distinct JSON keys.
+        alert_id = note.get("id") or note.get("Id")
+        if alert_id in (None, ""):
+            continue  # without an id we cannot tell a repeat from a new alert
+        out.append(
+            GeoAlert(
+                alert_id=str(alert_id),
+                rider_id=_as_int(entry.get("riderId") or note.get("riderId")),
+                trip_id=_as_int(entry.get("tripId") or note.get("tripId")),
+                zone_name=note.get("name") or "",
+                subject=note.get("subject") or "",
+                body=note.get("body") or "",
+                sent_on=_parse_utc(note.get("sentOn")),
+                created_at=_parse_utc(note.get("createTime")),
+                alert_type=note.get("alertType"),
+                raw=note,
+            )
+        )
+    return out
+
+
+def _as_int(value: Any) -> int:
+    """Coerce an id that may arrive as a number or a string."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _parse_gps(data: dict[str, Any] | None) -> GpsFix | None:
