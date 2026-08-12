@@ -15,10 +15,14 @@ from homeassistant.config_entries import ConfigEntry
 
 from sf.api import GpsFix, StudentSchedule, Trip
 from sf.const import (
+    CONF_ANNOUNCEMENT_LEAD_HOURS,
     CONF_ANNOUNCEMENT_POLL_MINUTES,
+    CONF_ANNOUNCEMENT_TRAIL_HOURS,
     CONF_GEO_ALERT_POLL_SECONDS,
+    CONF_SCHEDULE_TICK_SECONDS,
     CONF_SUBSCRIBER_ID,
     GEO_ALERT_POLL_SECONDS,
+    SCHEDULE_TICK_SECONDS,
 )
 from sf.coordinator import RiderState, StopfinderCoordinator
 
@@ -161,6 +165,7 @@ class TestInsideAWindow:
 
         asyncio.run(coordinator._async_schedule_tick(NOW))
 
+        # A running trip is inside the announcement bracket too, so all three.
         assert coordinator.api.calls == ["gps", "geo_alerts", "announcements"]
         assert coordinator._unsub_gps is not None
 
@@ -197,18 +202,15 @@ class TestInsideAWindow:
         asyncio.run(coordinator._async_gps_tick(NOW + timedelta(seconds=120)))
         assert coordinator.api.calls == ["gps", "gps", "geo_alerts"]
 
-    def test_announcements_use_their_slower_clock(self) -> None:
-        coordinator = _coordinator(
-            trip=OPEN_TRIP, options={CONF_ANNOUNCEMENT_POLL_MINUTES: 15}
-        )
+    def test_announcements_do_not_ride_the_in_window_timer(self) -> None:
+        """They answer to a wider window, so they live on the schedule tick."""
+        coordinator = _coordinator(trip=OPEN_TRIP)
         asyncio.run(coordinator._async_schedule_tick(NOW))
         coordinator.api.calls.clear()
 
-        asyncio.run(coordinator._async_gps_tick(NOW + timedelta(minutes=14)))
-        assert "announcements" not in coordinator.api.calls
+        asyncio.run(coordinator._async_gps_tick(NOW + timedelta(hours=1)))
 
-        asyncio.run(coordinator._async_gps_tick(NOW + timedelta(minutes=15)))
-        assert "announcements" in coordinator.api.calls
+        assert "announcements" not in coordinator.api.calls
 
 
 class TestWindowClosing:
@@ -230,4 +232,114 @@ class TestWindowClosing:
 
         asyncio.run(coordinator._async_schedule_tick(NOW))
 
-        assert coordinator.api.calls == ["gps", "geo_alerts", "announcements"]
+        # Announcements are already primed and not due again yet.
+        assert coordinator.api.calls == ["gps", "geo_alerts"]
+
+
+class TestAnnouncementWindow:
+    """A wider bracket than the trip windows, anchored on the route itself."""
+
+    def test_opens_the_configured_lead_before_the_first_trip(self) -> None:
+        # Route starts 07:21 local; a 3h lead means polling from 04:21.
+        start = datetime(2026, 8, 11, 7, 21, tzinfo=timezone.utc)
+        coordinator = _coordinator(
+            trip=_trip(start=start, finish=start + timedelta(hours=1))
+        )
+
+        window_start, _ = coordinator.announcement_window
+
+        assert window_start == datetime(2026, 8, 11, 4, 21, tzinfo=timezone.utc)
+
+    def test_closes_the_configured_trail_after_the_last_trip(self) -> None:
+        start = datetime(2026, 8, 11, 7, 21, tzinfo=timezone.utc)
+        finish = datetime(2026, 8, 11, 15, 12, tzinfo=timezone.utc)
+        coordinator = _coordinator(trip=_trip(start=start, finish=finish))
+
+        _, window_end = coordinator.announcement_window
+
+        assert window_end == datetime(2026, 8, 11, 18, 12, tzinfo=timezone.utc)
+
+    def test_the_lead_and_trail_are_configurable(self) -> None:
+        start = datetime(2026, 8, 11, 7, 0, tzinfo=timezone.utc)
+        coordinator = _coordinator(
+            trip=_trip(start=start, finish=start + timedelta(hours=1)),
+            options={
+                CONF_ANNOUNCEMENT_LEAD_HOURS: 1,
+                CONF_ANNOUNCEMENT_TRAIL_HOURS: 0,
+            },
+        )
+
+        window_start, window_end = coordinator.announcement_window
+
+        assert window_start == datetime(2026, 8, 11, 6, 0, tzinfo=timezone.utc)
+        assert window_end == datetime(2026, 8, 11, 8, 0, tzinfo=timezone.utc)
+
+    def test_a_day_with_no_trips_has_no_window(self) -> None:
+        """A weekend or snow day stays completely silent."""
+        coordinator = _coordinator(trip=CLOSED_TRIP)
+        coordinator.data[RIDER_ID].schedule.trips = []
+
+        assert coordinator.announcement_window is None
+        assert not coordinator._in_announcement_window(NOW)
+
+    def test_announcements_poll_before_the_trip_window_opens(self) -> None:
+        """The whole point: caught two hours before the bus is due."""
+        start = NOW + timedelta(hours=2)
+        coordinator = _coordinator(
+            trip=_trip(start=start, finish=start + timedelta(hours=1))
+        )
+
+        asyncio.run(coordinator._async_schedule_tick(NOW))
+
+        # No trip is running, so no GPS or geo alerts — but the notice is caught.
+        assert coordinator.api.calls == ["announcements"]
+        assert coordinator._unsub_gps is None
+
+    def test_nothing_polls_outside_the_wider_window_either(self) -> None:
+        start = NOW + timedelta(hours=9)
+        coordinator = _coordinator(
+            trip=_trip(start=start, finish=start + timedelta(hours=1))
+        )
+
+        asyncio.run(coordinator._async_schedule_tick(NOW))
+
+        assert coordinator.api.calls == []
+
+    def test_announcements_repeat_on_their_own_interval(self) -> None:
+        start = NOW + timedelta(hours=2)
+        coordinator = _coordinator(
+            trip=_trip(start=start, finish=start + timedelta(hours=1)),
+            options={CONF_ANNOUNCEMENT_POLL_MINUTES: 15},
+        )
+        asyncio.run(coordinator._async_schedule_tick(NOW))
+        coordinator.api.calls.clear()
+
+        asyncio.run(coordinator._async_schedule_tick(NOW + timedelta(minutes=14)))
+        assert coordinator.api.calls == []
+
+        asyncio.run(coordinator._async_schedule_tick(NOW + timedelta(minutes=15)))
+        assert coordinator.api.calls == ["announcements"]
+
+
+class TestScheduleTickInterval:
+    def test_defaults_and_override(self) -> None:
+        assert _coordinator(trip=CLOSED_TRIP).schedule_tick_interval == timedelta(
+            seconds=SCHEDULE_TICK_SECONDS
+        )
+        coordinator = _coordinator(
+            trip=CLOSED_TRIP, options={CONF_SCHEDULE_TICK_SECONDS: 120}
+        )
+        assert coordinator.schedule_tick_interval == timedelta(seconds=120)
+
+    def test_applying_options_rearms_the_schedule_timer(self) -> None:
+        coordinator = _coordinator(trip=CLOSED_TRIP)
+        coordinator._start_schedule_timer()
+        assert coordinator._schedule_interval == timedelta(
+            seconds=SCHEDULE_TICK_SECONDS
+        )
+
+        coordinator.entry.options = {CONF_SCHEDULE_TICK_SECONDS: 120}
+        coordinator.async_apply_options()
+
+        assert coordinator._schedule_interval == timedelta(seconds=120)
+        assert coordinator._unsub_schedule is not None

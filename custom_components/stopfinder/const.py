@@ -81,7 +81,12 @@ DEFAULT_BEFORE_TRIP_MIN: Final = 15
 DEFAULT_AFTER_TRIP_MIN: Final = 15
 
 # How often to re-evaluate which trips are active (open/close the poll window).
+# Purely local except at day rollover, so this costs nothing to run often; the
+# cost of running it *rarely* is that a window can open up to this late.
 SCHEDULE_TICK_SECONDS: Final = 60
+SCHEDULE_TICK_SECONDS_MIN: Final = 30
+SCHEDULE_TICK_SECONDS_MAX: Final = 600
+CONF_SCHEDULE_TICK_SECONDS: Final = "schedule_tick_seconds"
 
 # How often to poll /gps while at least one trip is active.
 #
@@ -126,6 +131,18 @@ ANNOUNCEMENT_POLL_MINUTES: Final = 15
 ANNOUNCEMENT_POLL_MINUTES_MIN: Final = 5
 ANNOUNCEMENT_POLL_MINUTES_MAX: Final = 1440
 CONF_ANNOUNCEMENT_POLL_MINUTES: Final = "announcement_poll_minutes"
+
+# Announcements get a window of their own, wider than the trip windows, because
+# the notice that matters ("bus running late") is posted well before the bus is
+# due. It brackets the day's trips: opens this many hours before the first trip
+# starts, closes this many hours after the last one finishes. Set both to 0 to
+# confine announcements to the trip windows themselves.
+ANNOUNCEMENT_LEAD_HOURS: Final = 3
+ANNOUNCEMENT_TRAIL_HOURS: Final = 3
+ANNOUNCEMENT_WINDOW_HOURS_MIN: Final = 0
+ANNOUNCEMENT_WINDOW_HOURS_MAX: Final = 12
+CONF_ANNOUNCEMENT_LEAD_HOURS: Final = "announcement_lead_hours"
+CONF_ANNOUNCEMENT_TRAIL_HOURS: Final = "announcement_trail_hours"
 
 EVENT_ANNOUNCEMENT: Final = "stopfinder_announcement"
 

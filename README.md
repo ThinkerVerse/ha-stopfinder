@@ -7,7 +7,8 @@ profile — using the same undocumented Stopfinder API the mobile app uses.
 > Reverse-engineered from observed traffic and the app bundle. No official API
 > exists. Automated access may violate Stopfinder's ToS — the realistic risk is
 > your account being disabled, which also breaks the app for you. This
-> integration polls only during route windows, and not at all outside them.
+> integration polls only inside the day's route windows (announcements get a
+> wider bracket around them), and not at all outside those.
 
 ## How it works
 
@@ -25,7 +26,7 @@ profile — using the same undocumented Stopfinder API the mobile app uses.
    with one `{riderId, subscriberId, tripId, dataSourceId}` entry per rider/trip
    for today, returning the latest notification for each.
 6. **Announcements** — `GET {base}/announcementssent` returns district notices,
-   newest first, on their own slow clock.
+   newest first, checked inside a wider window bracketing the day's trips.
 7. **Live position** — `GET {base}/gps?groupName={clientId}_{dataSourceId}_{busNumber}`
    returns `{latitude, longitude, timestamp}`. The coordinator polls this every
    10s (configurable) while a trip window is open. Outside a window the timer
@@ -82,6 +83,8 @@ goal, the hub is the way — the details above are the map.
 - **Last geo alert** — timestamp of the most recent geo-alert notification for
   that student, with the zone name, subject, message, trip and alert id as
   attributes. Unknown until one fires.
+- **Last geo alert message** — the same alert's text as the state, for
+  dashboards that want to show the words without digging into attributes.
 - **Next pickup** / **Next dropoff** — timestamps for when the bus reaches *this
   student's* stop, from `pickUpTime` / `dropOffTime`, with the stop name and trip
   as attributes. These are not the same as the route window: the route may start
@@ -144,12 +147,15 @@ automation:
 Event data: `entry_id`, `announcement_id`, `subject`, `message`, `sent_on`,
 `sent_by`, `read`, `archived`.
 
-Polled every 15 minutes by default (**Configure** → *Minutes between announcement
-checks*, 5–1440) and, like everything else, **only while a trip window is open**.
-The window opens `beforeTrip` minutes ahead of the route — 15 in the sample
-district — so a late-bus notice is still picked up before the bus is due, and a
-check runs the instant the window opens. The app has no cadence to copy here: it
-refetches on app resume and on UI navigation, never on a timer.
+Polled every 15 minutes by default, inside a window of their own that brackets
+the day's trips — three hours either side by default, so a 07:21 route means
+checking from 04:21 until three hours after the last trip ends. That is wide
+enough to catch the morning notice that matters, and still nothing at all on a
+day with no trips. See [Nothing is requested outside a
+window](#nothing-is-requested-outside-a-window).
+
+The app has no cadence to copy here: it refetches on app resume and on UI
+navigation, never on a timer.
 
 ## Geo alerts
 
@@ -232,30 +238,52 @@ is why its map moves more often than once a minute. Being REST-only, adopting 60
 would make the app's degraded case our normal case, so the default is **10s while
 a trip is running** and nothing at all outside a window.
 
-### Nothing is requested outside a trip window
+### Nothing is requested outside a window
 
-Two timers, with a strict division of labour:
+Two timers, and two windows that decide what either may do.
 
-- **The schedule tick** (60s, always running) only computes which trips are
-  running. It makes no network call at all, with one exception: the roster is
-  refreshed once a day at rollover, and that cannot be deferred because the
-  windows themselves are derived from it.
-- **The in-window timer** is armed only while a window is open, and carries every
-  recurring request — `/gps` each tick, geo alerts and announcements each on
-  their own slower clock. When it is disarmed, the integration is silent.
+- **The schedule tick** runs always, and is local work: it computes which trips
+  are running. Two things make it reach the network — the roster refresh at day
+  rollover, and announcements when their window is open.
+- **The in-window timer** is armed only while a *trip* window is open, and
+  carries `/gps` every tick plus geo alerts on their own slower clock. Disarmed,
+  it is silent.
 
-So on a weekend, a snow day, or overnight, the traffic is zero. Over a normal
-school day it is one roster fetch plus whatever the two windows generate. Opening
-a window fetches everything immediately rather than waiting out an interval, the
-way the app does with `startWith(0)`.
+| Window | Bounds | Drives |
+|---|---|---|
+| Trip | `[start − beforeTrip, finish + afterTrip]` | `/gps`, geo alerts |
+| Announcement | `[first start − lead, last finish + trail]` | announcements |
+| Neither | — | nothing at all |
 
-All three cadences are tunable under **Configure**:
+The announcement window is deliberately the wider of the two: a *"bus running
+late"* notice goes out well before the bus is due, so confining it to the trip
+windows would surface it only once it had stopped being useful. It is anchored on
+the route's own start and finish, so with the default 3-hour lead a 07:21 route
+starts announcement polling at **04:21**, and a day finishing at 15:12 keeps
+checking until 18:12.
+
+For the sample two-trip schedule that works out to roughly 55 announcement
+requests across a school day, plus `/gps` and geo alerts only during the two
+~90-minute trip windows. **On a weekend, a snow day, or overnight there are no
+requests at all** — a day with no trips has no windows. Opening a window fetches
+immediately rather than waiting out an interval, the way the app does with
+`startWith(0)`.
+
+Everything is tunable under **Configure**:
 
 | Setting | Default | Range |
 |---|---|---|
 | Seconds between position checks | 10 | 10–300 |
 | Seconds between geo alert checks | 20 | 10–300 |
 | Minutes between announcement checks | 15 | 5–1440 |
+| Hours before the first trip to start checking announcements | 3 | 0–12 |
+| Hours after the last trip to keep checking announcements | 3 | 0–12 |
+| Seconds between schedule re-checks | 60 | 30–600 |
+
+Set both announcement hours to 0 to confine announcements to the trip windows.
+The staleness gate that decides when the tracker goes unavailable is deliberately
+*not* exposed: 300s is the app's own constant, and changing it would break the
+freshness contract the GPS-status sensor is built on.
 
 **Route windows follow the app's `isTripRunning`.** The trip's own
 `adjustMinutes` shifts both ends of the window first, then the student's
@@ -349,7 +377,7 @@ flow exports, APKs, and source maps.
 
 ```bash
 # after committing changes and bumping manifest.json "version"
-git tag v1.3.0
+git tag v1.4.0
 git push origin main --tags
 # then create a GitHub Release from that tag; HACS will offer it as an update
 ```

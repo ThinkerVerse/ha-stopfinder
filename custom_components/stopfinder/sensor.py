@@ -94,6 +94,15 @@ SENSORS: tuple[StopfinderSensorDescription, ...] = (
         value_fn=lambda s: (s.geo_alert.sent_on if s.geo_alert else None),
         attrs_fn=_geo_alert_attrs,
     ),
+    # The message as its own state, so a dashboard can show the text without
+    # digging into attributes and an automation can trigger on it directly.
+    StopfinderSensorDescription(
+        key="geo_alert_message",
+        translation_key="geo_alert_message",
+        icon="mdi:message-alert",
+        value_fn=lambda s: (s.geo_alert.body if s.geo_alert else None),
+        attrs_fn=_geo_alert_attrs,
+    ),
     # --- scheduled stop times, from pickUpTime/dropOffTime ------------------
     # These are the times the bus reaches *this student's* stop, as opposed to
     # start/finish which bracket the whole route.
@@ -214,7 +223,11 @@ class StopfinderSensor(CoordinatorEntity[StopfinderCoordinator], SensorEntity):
         state = self._state
         if not state:
             return None
-        return self.entity_description.value_fn(state)
+        value = self.entity_description.value_fn(state)
+        if isinstance(value, str):
+            # Home Assistant rejects states longer than 255 characters.
+            return value[:255]
+        return value
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
