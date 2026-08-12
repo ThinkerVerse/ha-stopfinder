@@ -32,10 +32,14 @@
     "step": {
       "init": {
         "title": "Stopfinder options",
-        "description": "How often to check the bus position while a trip is running (nothing is polled outside a trip window), and how often to check for district announcements.",
+        "description": "Position and geo alerts are checked only while a trip is running. Announcements use a wider window around the day's trips, so a late-bus notice is caught before the bus is due. Outside those windows nothing is requested.",
         "data": {
           "gps_poll_seconds": "Seconds between position checks",
-          "announcement_poll_minutes": "Minutes between announcement checks"
+          "geo_alert_poll_seconds": "Seconds between geo alert checks",
+          "announcement_poll_minutes": "Minutes between announcement checks",
+          "announcement_lead_hours": "Hours before the first trip to start checking announcements",
+          "announcement_trail_hours": "Hours after the last trip to keep checking announcements",
+          "schedule_tick_seconds": "Seconds between schedule re-checks"
         }
       }
     }
@@ -59,6 +63,9 @@
       },
       "geo_alert": {
         "name": "Last geo alert"
+      },
+      "geo_alert_message": {
+        "name": "Last geo alert message"
       },
       "next_pickup": {
         "name": "Next pickup"

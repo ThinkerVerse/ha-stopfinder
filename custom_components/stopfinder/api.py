@@ -187,6 +187,16 @@ class Trip:
         return self.window_start <= now <= self.window_end
 
     @property
+    def adjusted_start_time(self) -> datetime:
+        """Route start with adjustMinutes applied, before before/after padding."""
+        return self.start_time + timedelta(minutes=self.adjust_minutes)
+
+    @property
+    def adjusted_finish_time(self) -> datetime:
+        """Route finish with adjustMinutes applied."""
+        return self.finish_time + timedelta(minutes=self.adjust_minutes)
+
+    @property
     def adjusted_pickup_time(self) -> datetime | None:
         """Pickup time with adjustMinutes applied, as the app's display does."""
         if self.pickup_time is None:

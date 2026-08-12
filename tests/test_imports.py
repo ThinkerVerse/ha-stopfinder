@@ -116,7 +116,14 @@ def test_options_schema_keys_have_labels() -> None:
     const = importlib.import_module("sf.const")
     component = Path(__file__).resolve().parents[1] / "custom_components" / "stopfinder"
 
-    expected = {const.CONF_GPS_POLL_SECONDS, const.CONF_ANNOUNCEMENT_POLL_MINUTES}
+    expected = {
+        const.CONF_GPS_POLL_SECONDS,
+        const.CONF_GEO_ALERT_POLL_SECONDS,
+        const.CONF_ANNOUNCEMENT_POLL_MINUTES,
+        const.CONF_ANNOUNCEMENT_LEAD_HOURS,
+        const.CONF_ANNOUNCEMENT_TRAIL_HOURS,
+        const.CONF_SCHEDULE_TICK_SECONDS,
+    }
     for path in (component / "strings.json", component / "translations" / "en.json"):
         labels = json.loads(path.read_text())["options"]["step"]["init"]["data"]
         assert expected <= set(labels), path.name

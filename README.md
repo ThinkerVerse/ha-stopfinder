@@ -7,7 +7,8 @@ profile — using the same undocumented Stopfinder API the mobile app uses.
 > Reverse-engineered from observed traffic and the app bundle. No official API
 > exists. Automated access may violate Stopfinder's ToS — the realistic risk is
 > your account being disabled, which also breaks the app for you. This
-> integration polls only during route windows, and not at all outside them.
+> integration polls only inside the day's route windows (announcements get a
+> wider bracket around them), and not at all outside those.
 
 ## How it works
 
@@ -25,7 +26,7 @@ profile — using the same undocumented Stopfinder API the mobile app uses.
    with one `{riderId, subscriberId, tripId, dataSourceId}` entry per rider/trip
    for today, returning the latest notification for each.
 6. **Announcements** — `GET {base}/announcementssent` returns district notices,
-   newest first, on their own slow clock.
+   newest first, checked inside a wider window bracketing the day's trips.
 7. **Live position** — `GET {base}/gps?groupName={clientId}_{dataSourceId}_{busNumber}`
    returns `{latitude, longitude, timestamp}`. The coordinator polls this every
    10s (configurable) while a trip window is open. Outside a window the timer
@@ -82,6 +83,8 @@ goal, the hub is the way — the details above are the map.
 - **Last geo alert** — timestamp of the most recent geo-alert notification for
   that student, with the zone name, subject, message, trip and alert id as
   attributes. Unknown until one fires.
+- **Last geo alert message** — the same alert's text as the state, for
+  dashboards that want to show the words without digging into attributes.
 - **Next pickup** / **Next dropoff** — timestamps for when the bus reaches *this
   student's* stop, from `pickUpTime` / `dropOffTime`, with the stop name and trip
   as attributes. These are not the same as the route window: the route may start
@@ -135,7 +138,7 @@ automation:
         value_template: >
           {{ (now() - (trigger.event.data.sent_on | as_datetime)).days < 1 }}
     actions:
-      - action: notify.mobile_app
+      - action: notify.mobile_app_your_phone  # your device's own service
         data:
           title: "{{ trigger.event.data.subject }}"
           message: "{{ trigger.event.data.message }}"
@@ -144,10 +147,15 @@ automation:
 Event data: `entry_id`, `announcement_id`, `subject`, `message`, `sent_on`,
 `sent_by`, `read`, `archived`.
 
-Polled every 15 minutes by default (**Configure** → *Minutes between announcement
-checks*, 5–1440), independent of trip windows — a "running late" notice matters
-most *before* the bus is due. The app has no cadence to copy here: it refetches
-on app resume and on UI navigation, never on a timer.
+Polled every 15 minutes by default, inside a window of their own that brackets
+the day's trips — three hours either side by default, so a 07:21 route means
+checking from 04:21 until three hours after the last trip ends. That is wide
+enough to catch the morning notice that matters, and still nothing at all on a
+day with no trips. See [Nothing is requested outside a
+window](#nothing-is-requested-outside-a-window).
+
+The app has no cadence to copy here: it refetches on app resume and on UI
+navigation, never on a timer.
 
 ## Geo alerts
 
@@ -167,7 +175,7 @@ automation:
         event_data:
           zone: Spring Hill
     actions:
-      - action: notify.mobile_app
+      - action: notify.mobile_app_your_phone  # your device's own service
         data:
           message: "{{ trigger.event.data.message }}"
 ```
@@ -187,10 +195,15 @@ Two behaviours worth knowing:
   while Home Assistant was down populates the sensor but does not raise an
   event, so a restart cannot replay yesterday's arrival.
 
-Polling happens on the 60s schedule tick — the app's own cadence for this call
+Polled every 20s by default while a trip is running, and never otherwise.
+
+The app's own cadence for this call is 60s
 (`interval(4 * CACHE_LIFETIME_MINUTES * 1000)`, where `CACHE_LIFETIME_MINUTES` is
-15) — and only while a trip is running, since that is when a bus can cross a
-zone.
+15), but that is only its floor: the app *also* receives geo alerts by push — its
+handler builds them from `additionalData` on an incoming message — so it never
+waits on the poll. Having no push available, polling faster is the only way to
+narrow the gap. Expect to trail the native app by up to the poll interval; you
+cannot beat push with polling.
 
 `alertType` is passed through verbatim as an attribute rather than interpreted:
 the app writes it (`false` for a push-delivered alert) but never reads it back,
@@ -225,10 +238,52 @@ is why its map moves more often than once a minute. Being REST-only, adopting 60
 would make the app's degraded case our normal case, so the default is **10s while
 a trip is running** and nothing at all outside a window.
 
-The window state, not a flag, controls the timer: the schedule tick arms it when a
-window opens (polling immediately, as the app does with `startWith(0)`) and
-disarms it when the last window closes. Set **Configure → Seconds between
-position checks** to trade responsiveness against request volume (10-300s).
+### Nothing is requested outside a window
+
+Two timers, and two windows that decide what either may do.
+
+- **The schedule tick** runs always, and is local work: it computes which trips
+  are running. Two things make it reach the network — the roster refresh at day
+  rollover, and announcements when their window is open.
+- **The in-window timer** is armed only while a *trip* window is open, and
+  carries `/gps` every tick plus geo alerts on their own slower clock. Disarmed,
+  it is silent.
+
+| Window | Bounds | Drives |
+|---|---|---|
+| Trip | `[start − beforeTrip, finish + afterTrip]` | `/gps`, geo alerts |
+| Announcement | `[first start − lead, last finish + trail]` | announcements |
+| Neither | — | nothing at all |
+
+The announcement window is deliberately the wider of the two: a *"bus running
+late"* notice goes out well before the bus is due, so confining it to the trip
+windows would surface it only once it had stopped being useful. It is anchored on
+the route's own start and finish, so with the default 3-hour lead a 07:21 route
+starts announcement polling at **04:21**, and a day finishing at 15:12 keeps
+checking until 18:12.
+
+For the sample two-trip schedule that works out to roughly 55 announcement
+requests across a school day, plus `/gps` and geo alerts only during the two
+~90-minute trip windows. **On a weekend, a snow day, or overnight there are no
+requests at all** — a day with no trips has no windows. Opening a window fetches
+immediately rather than waiting out an interval, the way the app does with
+`startWith(0)`.
+
+Everything is tunable under **Configure**:
+
+| Setting | Default | Range |
+|---|---|---|
+| Seconds between position checks | 10 | 10–300 |
+| Seconds between geo alert checks | 20 | 10–300 |
+| Minutes between announcement checks | 15 | 5–1440 |
+| Hours before the first trip to start checking announcements | 3 | 0–12 |
+| Hours after the last trip to keep checking announcements | 3 | 0–12 |
+| Seconds between schedule re-checks | 60 | 30–600 |
+
+Set both announcement hours to 0 to confine announcements to the trip windows.
+The staleness gate that decides when the tracker goes unavailable is deliberately
+*not* exposed: 300s is the app's own constant, and changing it would break the
+freshness contract the GPS-status sensor is built on.
 
 **Route windows follow the app's `isTripRunning`.** The trip's own
 `adjustMinutes` shifts both ends of the window first, then the student's
@@ -309,8 +364,8 @@ python3 -m pytest tests/ -q
 
 The suite covers roster, `/gps`, geo-alert and announcement parsing, route-window maths
 (including `adjustMinutes`), the derived GPS-status matrix, request
-deduplication, geo-alert priming and event dedupe, and an import smoke test for
-the whole package.
+deduplication, geo-alert priming and event dedupe, the guarantee that nothing is
+polled outside a trip window, and an import smoke test for the whole package.
 
 ## Scrub before publishing
 
@@ -322,7 +377,7 @@ flow exports, APKs, and source maps.
 
 ```bash
 # after committing changes and bumping manifest.json "version"
-git tag v1.2.1
+git tag v1.4.0
 git push origin main --tags
 # then create a GitHub Release from that tag; HACS will offer it as an update
 ```

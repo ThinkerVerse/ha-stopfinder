@@ -13,23 +13,37 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import StopfinderApi, StopfinderAuthError, StopfinderError, Tokens
 from .const import (
+    ANNOUNCEMENT_LEAD_HOURS,
     ANNOUNCEMENT_POLL_MINUTES,
     ANNOUNCEMENT_POLL_MINUTES_MAX,
     ANNOUNCEMENT_POLL_MINUTES_MIN,
+    ANNOUNCEMENT_TRAIL_HOURS,
+    ANNOUNCEMENT_WINDOW_HOURS_MAX,
+    ANNOUNCEMENT_WINDOW_HOURS_MIN,
+    CONF_ANNOUNCEMENT_LEAD_HOURS,
     CONF_ANNOUNCEMENT_POLL_MINUTES,
+    CONF_ANNOUNCEMENT_TRAIL_HOURS,
     CONF_BASE_URI,
     CONF_CLIENT_KEYS,
     CONF_DEVICE_ID,
+    CONF_GEO_ALERT_POLL_SECONDS,
     CONF_GPS_POLL_SECONDS,
     CONF_PASSWORD,
     CONF_REFRESH_TOKEN,
+    CONF_SCHEDULE_TICK_SECONDS,
     CONF_SF_CLIENT_ID,
     CONF_SUBSCRIBER_ID,
     CONF_USERNAME,
     DOMAIN,
+    GEO_ALERT_POLL_SECONDS,
+    GEO_ALERT_POLL_SECONDS_MAX,
+    GEO_ALERT_POLL_SECONDS_MIN,
     GPS_POLL_SECONDS,
     GPS_POLL_SECONDS_MAX,
     GPS_POLL_SECONDS_MIN,
+    SCHEDULE_TICK_SECONDS,
+    SCHEDULE_TICK_SECONDS_MAX,
+    SCHEDULE_TICK_SECONDS_MIN,
 )
 
 STEP_USER_SCHEMA = vol.Schema(
@@ -205,8 +219,28 @@ class StopfinderOptionsFlow(config_entries.OptionsFlow):
         entry = self.hass.config_entries.async_get_entry(self._entry_id)
         options = entry.options if entry else {}
         gps_current = options.get(CONF_GPS_POLL_SECONDS, GPS_POLL_SECONDS)
+        geo_current = options.get(
+            CONF_GEO_ALERT_POLL_SECONDS, GEO_ALERT_POLL_SECONDS
+        )
         announcement_current = options.get(
             CONF_ANNOUNCEMENT_POLL_MINUTES, ANNOUNCEMENT_POLL_MINUTES
+        )
+        lead_current = options.get(
+            CONF_ANNOUNCEMENT_LEAD_HOURS, ANNOUNCEMENT_LEAD_HOURS
+        )
+        trail_current = options.get(
+            CONF_ANNOUNCEMENT_TRAIL_HOURS, ANNOUNCEMENT_TRAIL_HOURS
+        )
+        tick_current = options.get(
+            CONF_SCHEDULE_TICK_SECONDS, SCHEDULE_TICK_SECONDS
+        )
+
+        hours = vol.All(
+            vol.Coerce(int),
+            vol.Range(
+                min=ANNOUNCEMENT_WINDOW_HOURS_MIN,
+                max=ANNOUNCEMENT_WINDOW_HOURS_MAX,
+            ),
         )
 
         return self.async_show_form(
@@ -220,12 +254,36 @@ class StopfinderOptionsFlow(config_entries.OptionsFlow):
                         vol.Range(min=GPS_POLL_SECONDS_MIN, max=GPS_POLL_SECONDS_MAX),
                     ),
                     vol.Required(
+                        CONF_GEO_ALERT_POLL_SECONDS, default=geo_current
+                    ): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(
+                            min=GEO_ALERT_POLL_SECONDS_MIN,
+                            max=GEO_ALERT_POLL_SECONDS_MAX,
+                        ),
+                    ),
+                    vol.Required(
                         CONF_ANNOUNCEMENT_POLL_MINUTES, default=announcement_current
                     ): vol.All(
                         vol.Coerce(int),
                         vol.Range(
                             min=ANNOUNCEMENT_POLL_MINUTES_MIN,
                             max=ANNOUNCEMENT_POLL_MINUTES_MAX,
+                        ),
+                    ),
+                    vol.Required(
+                        CONF_ANNOUNCEMENT_LEAD_HOURS, default=lead_current
+                    ): hours,
+                    vol.Required(
+                        CONF_ANNOUNCEMENT_TRAIL_HOURS, default=trail_current
+                    ): hours,
+                    vol.Required(
+                        CONF_SCHEDULE_TICK_SECONDS, default=tick_current
+                    ): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(
+                            min=SCHEDULE_TICK_SECONDS_MIN,
+                            max=SCHEDULE_TICK_SECONDS_MAX,
                         ),
                     ),
                 }
