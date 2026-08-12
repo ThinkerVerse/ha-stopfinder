@@ -1,15 +1,19 @@
 """Poll coordinator for Stopfinder.
 
-Live position comes from GET /gps?groupName=... The coordinator:
-  * logs in, then keeps the JWT alive with the refresh grant (falling back to a
-    full re-login only if the refresh token is rejected);
-  * refreshes the day's roster and re-evaluates active trips on a slow tick;
-  * while >=1 trip is active, polls /gps on a fast tick and pushes positions;
-  * while >=1 trip is active, also refreshes geo-alert notifications on the slow
-    tick, raising an event for each alert it has not seen before;
-  * refreshes district announcements on their own slow clock, independent of
-    trips, raising an event for each notice it has not seen before;
-  * outside every trip window, does no GPS polling at all.
+Live position comes from GET /gps?groupName=... Two timers drive everything:
+
+  * a slow schedule tick that only computes which trips are running. It makes no
+    network call except the once-a-day roster refresh at rollover, which cannot
+    be deferred because the windows are derived from it;
+  * an in-window timer, armed only while a trip window is open, which carries
+    every recurring request: /gps each tick, geo-alert notifications and
+    district announcements each on their own slower clock.
+
+The upshot is that outside a trip window the integration makes no requests at
+all. Logging in and the daily roster fetch are the only exceptions.
+
+Availability is derived from fix freshness — the /gps payload has no status
+field, and the app derives its own `gpsStatus` the same way.
 
 Availability is derived from fix freshness — the /gps payload has no status
 field, and the app derives its own `gpsStatus` the same way.
@@ -42,6 +46,7 @@ from .const import (
     ANNOUNCEMENT_POLL_MINUTES,
     CONF_ANNOUNCEMENT_POLL_MINUTES,
     CONF_CLIENT_KEYS,
+    CONF_GEO_ALERT_POLL_SECONDS,
     CONF_DEVICE_ID,
     CONF_GPS_POLL_SECONDS,
     CONF_PASSWORD,
@@ -52,6 +57,7 @@ from .const import (
     DOMAIN,
     EVENT_ANNOUNCEMENT,
     EVENT_GEO_ALERT,
+    GEO_ALERT_POLL_SECONDS,
     GPS_NO_VEHICLE,
     GPS_NOT_AVAILABLE,
     GPS_POLL_SECONDS,
@@ -135,6 +141,7 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         self._auth_failed = False
         self._seen_geo_alerts: set[str] = set()
         self._geo_alerts_primed = False
+        self._geo_alerts_polled_at: datetime | None = None
         self.announcement: Announcement | None = None
         self._seen_announcements: set[str] = set()
         self._announcements_primed = False
@@ -175,6 +182,13 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         """
         raw = self.api.client_id or self.entry.data.get(CONF_CLIENT_KEYS, "")
         return _title_case(raw)
+
+    @property
+    def _geo_alert_poll_interval(self) -> timedelta:
+        seconds = self.entry.options.get(
+            CONF_GEO_ALERT_POLL_SECONDS, GEO_ALERT_POLL_SECONDS
+        )
+        return timedelta(seconds=int(seconds))
 
     @property
     def _announcement_poll_interval(self) -> timedelta:
@@ -330,18 +344,30 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         self._schedule_day = date.today()
         self.async_set_updated_data(new_data)
 
-    async def _async_schedule_tick(self, _now: datetime) -> None:
+    async def _async_schedule_tick(self, now: datetime | None = None) -> None:
+        """Decide whether a window is open. Makes no network call of its own.
+
+        The roster is the one exception, and only at day rollover: the windows
+        themselves are derived from it, so it cannot be deferred until a window
+        is already open. Everything else rides the in-window timer.
+        """
         if self._auth_failed:
             return
-        try:
-            await self._ensure_token()
-            if self._schedule_day != date.today():
-                await self._refresh_schedule()
-        except ConfigEntryAuthFailed:
-            self._handle_auth_failure()
-            return
+        # Home Assistant passes the fire time; honour it rather than re-reading
+        # the clock, so window transitions and the tick agree on "now".
+        now = now or datetime.now(timezone.utc)
 
-        now = datetime.now(timezone.utc)
+        if self._schedule_day != date.today():
+            try:
+                await self._ensure_token()
+                await self._refresh_schedule()
+            except ConfigEntryAuthFailed:
+                self._handle_auth_failure()
+                return
+            except Exception as err:  # noqa: BLE001 - retry on the next tick
+                _LOGGER.debug("Roster refresh failed: %s", err)
+                return
+
         for rider in (self.data or {}).values():
             if not rider.schedule.display_vehicle_on_map:
                 rider.active_trip = None
@@ -349,32 +375,16 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
             rider.active_trip = _active_trip(rider.schedule.trips, now)
         self.async_update_listeners()
 
-        # Open or close the GPS timer to match the window state. Starting it also
-        # polls straight away rather than waiting out a first interval — the app
-        # does the same with startWith(0).
         if self._groups_to_poll():
             if self._start_gps_polling():
+                # Window just opened. Clear the in-window clocks so the first
+                # tick fetches everything immediately instead of waiting out an
+                # interval — the app does the same with startWith(0).
+                self._geo_alerts_polled_at = None
+                self._announcements_polled_at = None
                 await self._async_gps_tick(now)
         else:
             self._stop_gps_polling()
-
-        # Geo alerts ride this tick: the app refreshes them every 60s too. Only
-        # while a trip is running, since that is when a bus can cross a zone.
-        if _any_active_trip(self.data):
-            try:
-                await self._async_poll_geo_alerts()
-            except ConfigEntryAuthFailed:
-                self._handle_auth_failure()
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Geo alert poll failed: %s", err)
-
-        if self._announcements_due(now):
-            try:
-                await self._async_poll_announcements(now)
-            except ConfigEntryAuthFailed:
-                self._handle_auth_failure()
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Announcement poll failed: %s", err)
 
     # -- geo alerts -----------------------------------------------------------
 
@@ -404,7 +414,12 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
                 )
         return requests
 
-    async def _async_poll_geo_alerts(self) -> None:
+    def _geo_alerts_due(self, now: datetime) -> bool:
+        if self._geo_alerts_polled_at is None:
+            return True
+        return now - self._geo_alerts_polled_at >= self._geo_alert_poll_interval
+
+    async def _async_poll_geo_alerts(self, now: datetime) -> None:
         """Fetch geo alerts and raise an event for any we have not seen.
 
         The endpoint returns the latest alert per rider/trip on every call, so
@@ -426,6 +441,7 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
             alerts = await self.api.fetch_geo_alerts(
                 subscriber_id, requests, self._language
             )
+        self._geo_alerts_polled_at = now
 
         priming = not self._geo_alerts_primed
         self._geo_alerts_primed = True
@@ -542,12 +558,26 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
             groups.setdefault(rider.schedule.group_name(trip), []).append(rider)
         return groups
 
-    async def _async_gps_tick(self, _now: datetime) -> None:
+    async def _async_gps_tick(self, now: datetime | None = None) -> None:
+        """The in-window clock: every recurring network call rides this timer.
+
+        It exists only while a trip window is open, which is what keeps the
+        integration silent the rest of the day. Geo alerts and announcements are
+        checked here rather than on the schedule tick for the same reason — and
+        because the schedule tick is too slow to hit a sub-minute cadence.
+        """
         if self._auth_failed:
             return
+        now = now or datetime.now(timezone.utc)
         groups = self._groups_to_poll()
         if not groups:
             return  # nothing running -> no polling
+
+        try:
+            await self._ensure_token()
+        except ConfigEntryAuthFailed:
+            self._handle_auth_failure()
+            return
 
         changed = False
         for group, riders in groups.items():
@@ -562,6 +592,24 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
                 changed = True
         if changed:
             self.async_update_listeners()
+
+        if self._geo_alerts_due(now):
+            try:
+                await self._async_poll_geo_alerts(now)
+            except ConfigEntryAuthFailed:
+                self._handle_auth_failure()
+                return
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Geo alert poll failed: %s", err)
+
+        if self._announcements_due(now):
+            try:
+                await self._async_poll_announcements(now)
+            except ConfigEntryAuthFailed:
+                self._handle_auth_failure()
+                return
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Announcement poll failed: %s", err)
 
     async def _fetch_gps(self, group: str) -> GpsFix | None:
         """Poll one group, refreshing the token once if it has expired."""
@@ -603,10 +651,6 @@ def _soonest(trips: list[Trip], attr: str, now: datetime) -> Trip | None:
     if not upcoming:
         return None
     return min(upcoming, key=lambda trip: getattr(trip, attr))
-
-
-def _any_active_trip(data: dict[int, RiderState] | None) -> bool:
-    return any(rider.active_trip for rider in (data or {}).values())
 
 
 def _is_newer(alert: GeoAlert, current: GeoAlert | None) -> bool:

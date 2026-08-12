@@ -102,19 +102,26 @@ GPS_POLL_SECONDS_MAX: Final = 300
 GPS_STALE_AFTER_SECONDS: Final = 300
 
 # --- Geo alerts ---------------------------------------------------------------
-# The app refreshes these on interval(4 * CACHE_LIFETIME_MINUTES * 1000) with
-# CACHE_LIFETIME_MINUTES = 15, i.e. every 60s — the same cadence as our schedule
-# tick, which is where the poll is hung.
+# The app refreshes these every 60s — interval(4 * CACHE_LIFETIME_MINUTES * 1000)
+# with CACHE_LIFETIME_MINUTES = 15 — but the app also gets them by push, so 60s
+# is only its floor. We have no push, so polling faster is the only way to close
+# the gap. Checked on the in-window timer, so it never runs outside a trip.
+GEO_ALERT_POLL_SECONDS: Final = 20
+GEO_ALERT_POLL_SECONDS_MIN: Final = 10
+GEO_ALERT_POLL_SECONDS_MAX: Final = 300
+CONF_GEO_ALERT_POLL_SECONDS: Final = "geo_alert_poll_seconds"
+
 DEFAULT_LANGUAGE: Final = "en"
 
 # Fired on the HA event bus when a geo alert we have not seen before arrives.
 EVENT_GEO_ALERT: Final = "stopfinder_geo_alert"
 
 # --- Announcements ------------------------------------------------------------
-# District-wide notices ("bus 233 running 20 minutes late"). Rare, but the ones
-# that matter arrive in the morning, so they are polled on their own slow timer
-# rather than with the roster. The app has no cadence to copy: it refetches on
-# app resume and on UI navigation, never on an interval.
+# District-wide notices ("bus 233 running 20 minutes late"). Rare, so they get a
+# slow interval of their own, but they are still checked only inside a trip
+# window. The window opens beforeTrip minutes ahead of the route, which is the
+# lead time a late-bus notice needs. The app has no cadence to copy: it refetches
+# on app resume and on UI navigation, never on an interval.
 ANNOUNCEMENT_POLL_MINUTES: Final = 15
 ANNOUNCEMENT_POLL_MINUTES_MIN: Final = 5
 ANNOUNCEMENT_POLL_MINUTES_MAX: Final = 1440

@@ -288,7 +288,7 @@ class TestGeoAlertPolling:
         alert = _alert("1", datetime(2026, 8, 11, 11, 30, tzinfo=timezone.utc))
         coordinator = _coordinator(responses=[[alert]])
 
-        asyncio.run(coordinator._async_poll_geo_alerts())
+        asyncio.run(coordinator._async_poll_geo_alerts(_NOW))
 
         assert coordinator.hass.bus.events == []
         # ...but the alert is still shown on the entity.
@@ -299,9 +299,9 @@ class TestGeoAlertPolling:
         second = _alert("2", datetime(2026, 8, 11, 11, 45, tzinfo=timezone.utc))
         coordinator = _coordinator(responses=[[first], [second], [second]])
 
-        asyncio.run(coordinator._async_poll_geo_alerts())  # primes
-        asyncio.run(coordinator._async_poll_geo_alerts())  # new -> fires
-        asyncio.run(coordinator._async_poll_geo_alerts())  # repeat -> silent
+        asyncio.run(coordinator._async_poll_geo_alerts(_NOW))  # primes
+        asyncio.run(coordinator._async_poll_geo_alerts(_NOW))  # new -> fires
+        asyncio.run(coordinator._async_poll_geo_alerts(_NOW))  # repeat -> silent
 
         assert len(coordinator.hass.bus.events) == 1
         event_type, data = coordinator.hass.bus.events[0]
@@ -327,22 +327,25 @@ class TestGeoAlertPolling:
         )
         coordinator = _coordinator(responses=[[stray], [stray]])
 
-        asyncio.run(coordinator._async_poll_geo_alerts())
-        asyncio.run(coordinator._async_poll_geo_alerts())
+        asyncio.run(coordinator._async_poll_geo_alerts(_NOW))
+        asyncio.run(coordinator._async_poll_geo_alerts(_NOW))
 
         assert coordinator.hass.bus.events == []
         assert coordinator.data[RIDER_ID].geo_alert is None
 
     def test_nothing_is_requested_without_a_payload(self) -> None:
         coordinator = _coordinator(riders={})
-        asyncio.run(coordinator._async_poll_geo_alerts())
+        asyncio.run(coordinator._async_poll_geo_alerts(_NOW))
         assert coordinator.api.calls == []
 
     def test_the_configured_language_is_sent(self) -> None:
         coordinator = _coordinator(responses=[[]])
-        asyncio.run(coordinator._async_poll_geo_alerts())
+        asyncio.run(coordinator._async_poll_geo_alerts(_NOW))
 
         subscriber_id, requests, language = coordinator.api.calls[0]
         assert subscriber_id == SUBSCRIBER_ID
         assert language == "en"
         assert len(requests) == 1
+
+
+_NOW = datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc)

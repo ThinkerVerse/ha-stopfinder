@@ -135,7 +135,7 @@ automation:
         value_template: >
           {{ (now() - (trigger.event.data.sent_on | as_datetime)).days < 1 }}
     actions:
-      - action: notify.mobile_app
+      - action: notify.mobile_app_your_phone  # your device's own service
         data:
           title: "{{ trigger.event.data.subject }}"
           message: "{{ trigger.event.data.message }}"
@@ -145,9 +145,11 @@ Event data: `entry_id`, `announcement_id`, `subject`, `message`, `sent_on`,
 `sent_by`, `read`, `archived`.
 
 Polled every 15 minutes by default (**Configure** → *Minutes between announcement
-checks*, 5–1440), independent of trip windows — a "running late" notice matters
-most *before* the bus is due. The app has no cadence to copy here: it refetches
-on app resume and on UI navigation, never on a timer.
+checks*, 5–1440) and, like everything else, **only while a trip window is open**.
+The window opens `beforeTrip` minutes ahead of the route — 15 in the sample
+district — so a late-bus notice is still picked up before the bus is due, and a
+check runs the instant the window opens. The app has no cadence to copy here: it
+refetches on app resume and on UI navigation, never on a timer.
 
 ## Geo alerts
 
@@ -167,7 +169,7 @@ automation:
         event_data:
           zone: Spring Hill
     actions:
-      - action: notify.mobile_app
+      - action: notify.mobile_app_your_phone  # your device's own service
         data:
           message: "{{ trigger.event.data.message }}"
 ```
@@ -187,10 +189,15 @@ Two behaviours worth knowing:
   while Home Assistant was down populates the sensor but does not raise an
   event, so a restart cannot replay yesterday's arrival.
 
-Polling happens on the 60s schedule tick — the app's own cadence for this call
+Polled every 20s by default while a trip is running, and never otherwise.
+
+The app's own cadence for this call is 60s
 (`interval(4 * CACHE_LIFETIME_MINUTES * 1000)`, where `CACHE_LIFETIME_MINUTES` is
-15) — and only while a trip is running, since that is when a bus can cross a
-zone.
+15), but that is only its floor: the app *also* receives geo alerts by push — its
+handler builds them from `additionalData` on an incoming message — so it never
+waits on the poll. Having no push available, polling faster is the only way to
+narrow the gap. Expect to trail the native app by up to the poll interval; you
+cannot beat push with polling.
 
 `alertType` is passed through verbatim as an attribute rather than interpreted:
 the app writes it (`false` for a push-delivered alert) but never reads it back,
@@ -225,10 +232,30 @@ is why its map moves more often than once a minute. Being REST-only, adopting 60
 would make the app's degraded case our normal case, so the default is **10s while
 a trip is running** and nothing at all outside a window.
 
-The window state, not a flag, controls the timer: the schedule tick arms it when a
-window opens (polling immediately, as the app does with `startWith(0)`) and
-disarms it when the last window closes. Set **Configure → Seconds between
-position checks** to trade responsiveness against request volume (10-300s).
+### Nothing is requested outside a trip window
+
+Two timers, with a strict division of labour:
+
+- **The schedule tick** (60s, always running) only computes which trips are
+  running. It makes no network call at all, with one exception: the roster is
+  refreshed once a day at rollover, and that cannot be deferred because the
+  windows themselves are derived from it.
+- **The in-window timer** is armed only while a window is open, and carries every
+  recurring request — `/gps` each tick, geo alerts and announcements each on
+  their own slower clock. When it is disarmed, the integration is silent.
+
+So on a weekend, a snow day, or overnight, the traffic is zero. Over a normal
+school day it is one roster fetch plus whatever the two windows generate. Opening
+a window fetches everything immediately rather than waiting out an interval, the
+way the app does with `startWith(0)`.
+
+All three cadences are tunable under **Configure**:
+
+| Setting | Default | Range |
+|---|---|---|
+| Seconds between position checks | 10 | 10–300 |
+| Seconds between geo alert checks | 20 | 10–300 |
+| Minutes between announcement checks | 15 | 5–1440 |
 
 **Route windows follow the app's `isTripRunning`.** The trip's own
 `adjustMinutes` shifts both ends of the window first, then the student's
@@ -309,8 +336,8 @@ python3 -m pytest tests/ -q
 
 The suite covers roster, `/gps`, geo-alert and announcement parsing, route-window maths
 (including `adjustMinutes`), the derived GPS-status matrix, request
-deduplication, geo-alert priming and event dedupe, and an import smoke test for
-the whole package.
+deduplication, geo-alert priming and event dedupe, the guarantee that nothing is
+polled outside a trip window, and an import smoke test for the whole package.
 
 ## Scrub before publishing
 
@@ -322,7 +349,7 @@ flow exports, APKs, and source maps.
 
 ```bash
 # after committing changes and bumping manifest.json "version"
-git tag v1.2.1
+git tag v1.3.0
 git push origin main --tags
 # then create a GitHub Release from that tag; HACS will offer it as an update
 ```

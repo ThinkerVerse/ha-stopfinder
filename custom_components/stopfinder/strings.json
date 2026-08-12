@@ -32,9 +32,10 @@
     "step": {
       "init": {
         "title": "Stopfinder options",
-        "description": "How often to check the bus position while a trip is running (nothing is polled outside a trip window), and how often to check for district announcements.",
+        "description": "How often to check each thing while a trip is running. Nothing is polled outside a trip window.",
         "data": {
           "gps_poll_seconds": "Seconds between position checks",
+          "geo_alert_poll_seconds": "Seconds between geo alert checks",
           "announcement_poll_minutes": "Minutes between announcement checks"
         }
       }
