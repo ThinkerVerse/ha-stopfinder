@@ -146,4 +146,19 @@ CONF_ANNOUNCEMENT_TRAIL_HOURS: Final = "announcement_trail_hours"
 
 EVENT_ANNOUNCEMENT: Final = "stopfinder_announcement"
 
+# --- Vehicle substitution -----------------------------------------------------
+# Dispatch can swap the bus mid-day (`vehicleSubstitutionEnabled`), and the
+# roster's busNumber is what the /gps groupName is built from. The app keeps up
+# because it re-fetches the roster every CACHE_LIFETIME_MINUTES (15); refreshing
+# only at day rollover leaves us polling the bus that was assigned at midnight.
+ROSTER_REFRESH_MINUTES: Final = 15
+ROSTER_REFRESH_MINUTES_MIN: Final = 5
+ROSTER_REFRESH_MINUTES_MAX: Final = 240
+CONF_ROSTER_REFRESH_MINUTES: Final = "roster_refresh_minutes"
+
+# Fired when a trip's bus number changes within the same day. Derived from the
+# roster rather than from a notification, so it does not depend on a channel we
+# cannot see.
+EVENT_VEHICLE_SUBSTITUTION: Final = "stopfinder_vehicle_substitution"
+
 PLATFORMS: Final = ["device_tracker", "sensor"]

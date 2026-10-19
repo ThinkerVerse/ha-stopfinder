@@ -7,7 +7,8 @@ Two timers, and three windows that decide what either may do:
     rollover (unavoidable, since the windows are derived from it) and district
     announcements, which have a window of their own;
   * the in-window timer is armed only while a trip window is open, and carries
-    /gps every tick plus geo-alert notifications on their own slower clock.
+    /gps every tick, geo-alert notifications on their own slower clock, and a
+    periodic roster re-read so a mid-day vehicle substitution is followed.
 
 The windows:
 
@@ -60,12 +61,14 @@ from .const import (
     CONF_PASSWORD,
     CONF_SCHEDULE_TICK_SECONDS,
     CONF_REFRESH_TOKEN,
+    CONF_ROSTER_REFRESH_MINUTES,
     CONF_SUBSCRIBER_ID,
     CONF_USERNAME,
     DEFAULT_LANGUAGE,
     DOMAIN,
     EVENT_ANNOUNCEMENT,
     EVENT_GEO_ALERT,
+    EVENT_VEHICLE_SUBSTITUTION,
     GEO_ALERT_POLL_SECONDS,
     GPS_NO_VEHICLE,
     GPS_NOT_AVAILABLE,
@@ -73,6 +76,7 @@ from .const import (
     GPS_SEARCHING,
     GPS_STALE_AFTER_SECONDS,
     GPS_VALID,
+    ROSTER_REFRESH_MINUTES,
     SCHEDULE_TICK_SECONDS,
     TOKEN_REFRESH_MARGIN_SECONDS,
 )
@@ -144,6 +148,7 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         self.api = StopfinderApi(async_get_clientsession(hass))
         self._tokens: Tokens | None = None
         self._schedule_day: date | None = None
+        self._roster_refreshed_at: datetime | None = None
         self._unsub_schedule = None
         self._schedule_interval: timedelta | None = None
         self._unsub_gps = None
@@ -208,6 +213,23 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
             CONF_GEO_ALERT_POLL_SECONDS, GEO_ALERT_POLL_SECONDS
         )
         return timedelta(seconds=int(seconds))
+
+    @property
+    def roster_refresh_interval(self) -> timedelta:
+        """How often the roster is re-read while a trip is running.
+
+        The bus number lives in the roster, and the /gps group name is built
+        from it, so a substitution is invisible until the roster is re-read.
+        """
+        minutes = self.entry.options.get(
+            CONF_ROSTER_REFRESH_MINUTES, ROSTER_REFRESH_MINUTES
+        )
+        return timedelta(minutes=int(minutes))
+
+    def _roster_due(self, now: datetime) -> bool:
+        if self._roster_refreshed_at is None:
+            return True
+        return now - self._roster_refreshed_at >= self.roster_refresh_interval
 
     @property
     def schedule_tick_interval(self) -> timedelta:
@@ -394,7 +416,7 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
 
     # -- schedule -------------------------------------------------------------
 
-    async def _refresh_schedule(self) -> None:
+    async def _refresh_schedule(self, now: datetime | None = None) -> None:
         try:
             try:
                 schedules = await self.api.fetch_students()
@@ -407,17 +429,62 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         except Exception as err:  # noqa: BLE001
             raise UpdateFailed(f"Roster fetch failed: {err}") from err
 
+        # Only compare against a roster from the *same* day. At rollover the
+        # trips are legitimately different, and treating that as a substitution
+        # would fire a spurious event every morning.
+        same_day = self._schedule_day == date.today()
+
         new_data: dict[int, RiderState] = {}
+        substitutions: list[tuple[RiderState, Trip, str]] = []
         for sched in schedules:
             prev = (self.data or {}).get(sched.rider_id)
-            new_data[sched.rider_id] = RiderState(
+            state = RiderState(
                 schedule=sched,
                 fix=prev.fix if prev else None,
                 geo_alert=prev.geo_alert if prev else None,
                 district=self.district,
             )
+            if same_day and prev is not None:
+                for trip, was in _bus_changes(prev.schedule, sched):
+                    substitutions.append((state, trip, was))
+            new_data[sched.rider_id] = state
+
         self._schedule_day = date.today()
+        # Record the caller's clock, not a fresh read, so the refresh interval
+        # is measured against the same "now" the tick is working from.
+        self._roster_refreshed_at = now or datetime.now(timezone.utc)
         self.async_set_updated_data(new_data)
+
+        for state, trip, was in substitutions:
+            _LOGGER.info(
+                "Vehicle substitution on trip %s: bus %s -> %s",
+                trip.name or trip.trip_id, was or "none", trip.bus_number or "none",
+            )
+            self._fire_substitution_event(state, trip, was)
+
+    def _fire_substitution_event(
+        self, rider: RiderState, trip: Trip, previous_bus: str
+    ) -> None:
+        self.hass.bus.async_fire(
+            EVENT_VEHICLE_SUBSTITUTION,
+            {
+                "entry_id": self.entry.entry_id,
+                "rider_id": rider.rider_id,
+                "student": rider.schedule.full_name,
+                "trip_id": trip.trip_id,
+                "trip": trip.name,
+                "previous_bus_number": previous_bus,
+                "bus_number": trip.bus_number,
+            },
+        )
+
+    def _recompute_active_trips(self, now: datetime) -> None:
+        """Re-evaluate which trip is running. Local work, no requests."""
+        for rider in (self.data or {}).values():
+            if not rider.schedule.display_vehicle_on_map:
+                rider.active_trip = None
+                continue
+            rider.active_trip = _active_trip(rider.schedule.trips, now)
 
     async def _async_schedule_tick(self, now: datetime | None = None) -> None:
         """Decide whether a window is open. Makes no network call of its own.
@@ -435,7 +502,7 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         if self._schedule_day != date.today():
             try:
                 await self._ensure_token()
-                await self._refresh_schedule()
+                await self._refresh_schedule(now)
             except ConfigEntryAuthFailed:
                 self._handle_auth_failure()
                 return
@@ -443,19 +510,18 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
                 _LOGGER.debug("Roster refresh failed: %s", err)
                 return
 
-        for rider in (self.data or {}).values():
-            if not rider.schedule.display_vehicle_on_map:
-                rider.active_trip = None
-                continue
-            rider.active_trip = _active_trip(rider.schedule.trips, now)
+        self._recompute_active_trips(now)
         self.async_update_listeners()
 
         if self._groups_to_poll():
             if self._start_gps_polling():
-                # Window just opened. Clear the in-window clock so the first tick
-                # fetches immediately instead of waiting out an interval — the
-                # app does the same with startWith(0).
+                # Window just opened. Clear the in-window clocks so the first
+                # tick fetches immediately instead of waiting out an interval —
+                # the app does the same with startWith(0). The roster goes with
+                # them: a substitution decided before the run starts has to be
+                # picked up before we build the first group name.
                 self._geo_alerts_polled_at = None
+                self._roster_refreshed_at = None
                 await self._async_gps_tick(now)
         else:
             self._stop_gps_polling()
@@ -654,8 +720,7 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         if self._auth_failed:
             return
         now = now or datetime.now(timezone.utc)
-        groups = self._groups_to_poll()
-        if not groups:
+        if not self._groups_to_poll():
             return  # nothing running -> no polling
 
         try:
@@ -663,6 +728,24 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         except ConfigEntryAuthFailed:
             self._handle_auth_failure()
             return
+
+        # Re-read the roster before building any group name. A substitution
+        # changes the bus number the group name is made of, so without this we
+        # would keep asking for the position of the bus that is no longer
+        # running this trip.
+        if self._roster_due(now):
+            try:
+                await self._refresh_schedule(now)
+                self._recompute_active_trips(now)
+            except ConfigEntryAuthFailed:
+                self._handle_auth_failure()
+                return
+            except Exception as err:  # noqa: BLE001 - keep the fix we have
+                _LOGGER.debug("Roster refresh failed: %s", err)
+
+        groups = self._groups_to_poll()
+        if not groups:
+            return  # the refreshed roster no longer has a running trip
 
         changed = False
         for group, riders in groups.items():
@@ -716,6 +799,22 @@ def _title_case(value: str) -> str:
         return ""
     parts = [part.strip() for part in value.split(",")]
     return ", ".join(part.title() if part.islower() else part for part in parts)
+
+
+def _bus_changes(
+    previous: StudentSchedule, current: StudentSchedule
+) -> list[tuple[Trip, str]]:
+    """Trips whose bus number changed, as (new trip, previous bus number).
+
+    Matched on trip id, since that is what survives a substitution — the bus
+    number is precisely the thing that moves.
+    """
+    was = {trip.trip_id: trip.bus_number for trip in previous.trips}
+    changed: list[tuple[Trip, str]] = []
+    for trip in current.trips:
+        if trip.trip_id in was and was[trip.trip_id] != trip.bus_number:
+            changed.append((trip, was[trip.trip_id]))
+    return changed
 
 
 def _soonest(trips: list[Trip], attr: str, now: datetime) -> Trip | None:

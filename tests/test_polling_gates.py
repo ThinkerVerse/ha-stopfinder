@@ -19,9 +19,12 @@ from sf.const import (
     CONF_ANNOUNCEMENT_POLL_MINUTES,
     CONF_ANNOUNCEMENT_TRAIL_HOURS,
     CONF_GEO_ALERT_POLL_SECONDS,
+    CONF_ROSTER_REFRESH_MINUTES,
     CONF_SCHEDULE_TICK_SECONDS,
     CONF_SUBSCRIBER_ID,
+    EVENT_VEHICLE_SUBSTITUTION,
     GEO_ALERT_POLL_SECONDS,
+    ROSTER_REFRESH_MINUTES,
     SCHEDULE_TICK_SECONDS,
 )
 from sf.coordinator import RiderState, StopfinderCoordinator
@@ -31,10 +34,16 @@ NOW = datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc)
 
 
 class _CountingApi:
-    """Records every endpoint the coordinator reaches for."""
+    """Records every endpoint the coordinator reaches for.
 
-    def __init__(self) -> None:
+    `roster` is what /students will return, so a test can leave it alone (the
+    schedule is unchanged, as on most refreshes) or swap it to model dispatch
+    reassigning the bus.
+    """
+
+    def __init__(self, roster: list[StudentSchedule] | None = None) -> None:
         self.calls: list[str] = []
+        self.roster = roster if roster is not None else []
         self.client_id = "bartholomew"
         self.client_keys = "bartholomew"
 
@@ -52,7 +61,7 @@ class _CountingApi:
 
     async def fetch_students(self, day=None):
         self.calls.append("students")
-        return []
+        return list(self.roster)
 
     async def fetch_client_identity(self):
         self.calls.append("apiversions")
@@ -88,29 +97,33 @@ def _trip(*, start: datetime, finish: datetime) -> Trip:
     )
 
 
-def _coordinator(*, trip: Trip, options: dict | None = None):
+def _schedule(*trips: Trip) -> StudentSchedule:
+    return StudentSchedule(
+        rider_id=RIDER_ID,
+        first_name="Test",
+        last_name="Student",
+        school="School",
+        client_id=577,
+        data_source_id=45,
+        display_vehicle_on_map=True,
+        tz_offset_minutes=-240.0,
+        trips=list(trips),
+    )
+
+
+def _coordinator(*, trip: Trip, options: dict | None = None, roster=None):
     entry = ConfigEntry(
         data={CONF_SUBSCRIBER_ID: 2058262}, options=options or {}
     )
     coordinator = StopfinderCoordinator(hass=_FakeHass(), entry=entry)
-    coordinator.api = _CountingApi()
-    coordinator.data = {
-        RIDER_ID: RiderState(
-            schedule=StudentSchedule(
-                rider_id=RIDER_ID,
-                first_name="Test",
-                last_name="Student",
-                school="School",
-                client_id=577,
-                data_source_id=45,
-                display_vehicle_on_map=True,
-                tz_offset_minutes=-240.0,
-                trips=[trip],
-            )
-        )
-    }
+    # By default /students returns the same schedule, so a refresh is a no-op.
+    coordinator.api = _CountingApi(
+        roster=roster if roster is not None else [_schedule(trip)]
+    )
+    coordinator.data = {RIDER_ID: RiderState(schedule=_schedule(trip))}
     # Pretend the roster is already current, so the rollover fetch is not due.
     coordinator._schedule_day = date.today()
+    coordinator._roster_refreshed_at = NOW
 
     async def _no_auth_needed() -> None:
         return None
@@ -165,8 +178,11 @@ class TestInsideAWindow:
 
         asyncio.run(coordinator._async_schedule_tick(NOW))
 
-        # A running trip is inside the announcement bracket too, so all three.
-        assert coordinator.api.calls == ["gps", "geo_alerts", "announcements"]
+        # The roster goes first: a substitution decided before the run starts
+        # has to be known before the first group name is built.
+        assert coordinator.api.calls == [
+            "students", "gps", "geo_alerts", "announcements",
+        ]
         assert coordinator._unsub_gps is not None
 
     def test_later_ticks_poll_gps_but_throttle_the_rest(self) -> None:
@@ -233,7 +249,7 @@ class TestWindowClosing:
         asyncio.run(coordinator._async_schedule_tick(NOW))
 
         # Announcements are already primed and not due again yet.
-        assert coordinator.api.calls == ["gps", "geo_alerts"]
+        assert coordinator.api.calls == ["students", "gps", "geo_alerts"]
 
 
 class TestAnnouncementWindow:
@@ -343,3 +359,104 @@ class TestScheduleTickInterval:
 
         assert coordinator._schedule_interval == timedelta(seconds=120)
         assert coordinator._unsub_schedule is not None
+
+
+class TestVehicleSubstitution:
+    """Dispatch swaps the bus mid-day; the roster is the only place that shows."""
+
+    def _running(self, bus: str) -> Trip:
+        trip = _trip(
+            start=NOW - timedelta(minutes=5), finish=NOW + timedelta(minutes=30)
+        )
+        trip.bus_number = bus
+        return trip
+
+    def test_the_group_name_follows_the_new_bus(self) -> None:
+        """The whole bug: /gps was still being asked for the old bus."""
+        coordinator = _coordinator(trip=self._running("233"))
+        asyncio.run(coordinator._async_schedule_tick(NOW))
+        assert list(coordinator._groups_to_poll()) == ["577_45_233"]
+
+        # Dispatch reassigns the trip to 242.
+        coordinator.api.roster = [_schedule(self._running("242"))]
+        coordinator._roster_refreshed_at = None
+        asyncio.run(coordinator._async_gps_tick(NOW))
+
+        assert list(coordinator._groups_to_poll()) == ["577_45_242"]
+
+    def test_an_event_is_raised_for_the_swap(self) -> None:
+        coordinator = _coordinator(trip=self._running("233"))
+        asyncio.run(coordinator._async_schedule_tick(NOW))
+        fired: list[tuple[str, dict]] = []
+        coordinator.hass.bus.async_fire = lambda t, d: fired.append((t, d))
+
+        coordinator.api.roster = [_schedule(self._running("242"))]
+        coordinator._roster_refreshed_at = None
+        asyncio.run(coordinator._async_gps_tick(NOW))
+
+        [(event_type, data)] = [e for e in fired if e[0] == EVENT_VEHICLE_SUBSTITUTION]
+        assert event_type == EVENT_VEHICLE_SUBSTITUTION
+        assert data["previous_bus_number"] == "233"
+        assert data["bus_number"] == "242"
+        assert data["trip_id"] == 303
+        assert data["student"] == "Test Student"
+
+    def test_an_unchanged_roster_raises_nothing(self) -> None:
+        coordinator = _coordinator(trip=self._running("233"))
+        asyncio.run(coordinator._async_schedule_tick(NOW))
+        fired: list[tuple[str, dict]] = []
+        coordinator.hass.bus.async_fire = lambda t, d: fired.append((t, d))
+
+        coordinator._roster_refreshed_at = None
+        asyncio.run(coordinator._async_gps_tick(NOW))
+
+        assert [e for e in fired if e[0] == EVENT_VEHICLE_SUBSTITUTION] == []
+
+    def test_a_rollover_is_not_a_substitution(self) -> None:
+        """Yesterday's bus differing from today's is normal, not a swap."""
+        coordinator = _coordinator(trip=self._running("233"))
+        fired: list[tuple[str, dict]] = []
+        coordinator.hass.bus.async_fire = lambda t, d: fired.append((t, d))
+
+        coordinator._schedule_day = date.today() - timedelta(days=1)
+        coordinator.api.roster = [_schedule(self._running("242"))]
+
+        asyncio.run(coordinator._refresh_schedule())
+
+        assert [e for e in fired if e[0] == EVENT_VEHICLE_SUBSTITUTION] == []
+
+    def test_the_roster_is_throttled_like_everything_else(self) -> None:
+        coordinator = _coordinator(trip=self._running("233"))
+        asyncio.run(coordinator._async_schedule_tick(NOW))
+        coordinator.api.calls.clear()
+
+        # Well inside the interval: no refetch.
+        asyncio.run(coordinator._async_gps_tick(NOW + timedelta(minutes=5)))
+        assert "students" not in coordinator.api.calls
+
+        asyncio.run(
+            coordinator._async_gps_tick(NOW + timedelta(minutes=ROSTER_REFRESH_MINUTES))
+        )
+        assert "students" in coordinator.api.calls
+
+    def test_the_roster_interval_is_configurable(self) -> None:
+        coordinator = _coordinator(
+            trip=self._running("233"), options={CONF_ROSTER_REFRESH_MINUTES: 60}
+        )
+        asyncio.run(coordinator._async_schedule_tick(NOW))
+        coordinator.api.calls.clear()
+
+        asyncio.run(coordinator._async_gps_tick(NOW + timedelta(minutes=30)))
+        assert "students" not in coordinator.api.calls
+
+        asyncio.run(coordinator._async_gps_tick(NOW + timedelta(minutes=60)))
+        assert "students" in coordinator.api.calls
+
+    def test_the_roster_is_not_refetched_outside_a_window(self) -> None:
+        """Still silent when no bus is running."""
+        coordinator = _coordinator(trip=CLOSED_TRIP)
+        coordinator._roster_refreshed_at = None
+
+        asyncio.run(coordinator._async_gps_tick(NOW))
+
+        assert coordinator.api.calls == []

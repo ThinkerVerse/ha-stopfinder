@@ -78,7 +78,7 @@ goal, the hub is the way — the details above are the map.
   | `NoVehicleAssigned` | The trip has no bus assigned, so there is nothing to track. |
   | *unknown* | Outside every trip window. |
 - **Bus number** — current `busNumber`; a separate entity because substitutions
-  change it (useful to alert on).
+  change it. See [Vehicle substitution](#vehicle-substitution).
 - **Active trip** — trip name (also encodes AM/PM and direction).
 - **Last geo alert** — timestamp of the most recent geo-alert notification for
   that student, with the zone name, subject, message, trip and alert id as
@@ -156,6 +156,47 @@ window](#nothing-is-requested-outside-a-window).
 
 The app has no cadence to copy here: it refetches on app resume and on UI
 navigation, never on a timer.
+
+## Vehicle substitution
+
+Dispatch can swap the bus mid-day (`vehicleSubstitutionEnabled`), and the bus
+number is what the `/gps` `groupName` is built from — so a stale roster means
+politely asking for the position of a bus that is no longer running the trip.
+
+The roster is therefore re-read **every 15 minutes while a trip is running**, and
+once more the moment a trip window opens, before the first group name is built.
+That matches the app, which re-fetches the roster on
+`interval(60 * CACHE_LIFETIME_MINUTES * 1000)` with `CACHE_LIFETIME_MINUTES = 15`
+— which is exactly why the app follows the substitute bus and an
+integration that refreshed only at day rollover did not.
+
+A change of bus number on the same trip, within the same day, raises
+**`stopfinder_vehicle_substitution`**:
+
+```yaml
+automation:
+  - alias: Bus substituted
+    triggers:
+      - trigger: event
+        event_type: stopfinder_vehicle_substitution
+    actions:
+      - action: notify.mobile_app_your_phone  # your device's own service
+        data:
+          title: "Bus change for {{ trigger.event.data.student }}"
+          message: >
+            {{ trigger.event.data.trip }} is now bus
+            {{ trigger.event.data.bus_number }}
+            (was {{ trigger.event.data.previous_bus_number }}).
+```
+
+Event data: `entry_id`, `rider_id`, `student`, `trip_id`, `trip`,
+`previous_bus_number`, `bus_number`.
+
+This is **derived from the roster**, not read from a notification feed, so it
+does not depend on whichever channel the district happens to use to announce the
+change. Comparison is restricted to rosters from the same day: at rollover the
+trips legitimately differ, and treating that as a substitution would fire every
+morning.
 
 ## Geo alerts
 
@@ -275,6 +316,7 @@ Everything is tunable under **Configure**:
 |---|---|---|
 | Seconds between position checks | 10 | 10–300 |
 | Seconds between geo alert checks | 20 | 10–300 |
+| Minutes between schedule re-reads while a trip is running | 15 | 5–240 |
 | Minutes between announcement checks | 15 | 5–1440 |
 | Hours before the first trip to start checking announcements | 3 | 0–12 |
 | Hours after the last trip to keep checking announcements | 3 | 0–12 |
@@ -377,7 +419,7 @@ flow exports, APKs, and source maps.
 
 ```bash
 # after committing changes and bumping manifest.json "version"
-git tag v1.4.0
+git tag v1.5.0
 git push origin main --tags
 # then create a GitHub Release from that tag; HACS will offer it as an update
 ```

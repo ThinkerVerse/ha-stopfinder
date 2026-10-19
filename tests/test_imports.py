@@ -123,6 +123,7 @@ def test_options_schema_keys_have_labels() -> None:
         const.CONF_ANNOUNCEMENT_LEAD_HOURS,
         const.CONF_ANNOUNCEMENT_TRAIL_HOURS,
         const.CONF_SCHEDULE_TICK_SECONDS,
+        const.CONF_ROSTER_REFRESH_MINUTES,
     }
     for path in (component / "strings.json", component / "translations" / "en.json"):
         labels = json.loads(path.read_text())["options"]["step"]["init"]["data"]
