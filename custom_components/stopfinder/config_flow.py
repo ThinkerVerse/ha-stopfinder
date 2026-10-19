@@ -30,6 +30,7 @@ from .const import (
     CONF_GPS_POLL_SECONDS,
     CONF_PASSWORD,
     CONF_REFRESH_TOKEN,
+    CONF_ROSTER_REFRESH_MINUTES,
     CONF_SCHEDULE_TICK_SECONDS,
     CONF_SF_CLIENT_ID,
     CONF_SUBSCRIBER_ID,
@@ -41,6 +42,9 @@ from .const import (
     GPS_POLL_SECONDS,
     GPS_POLL_SECONDS_MAX,
     GPS_POLL_SECONDS_MIN,
+    ROSTER_REFRESH_MINUTES,
+    ROSTER_REFRESH_MINUTES_MAX,
+    ROSTER_REFRESH_MINUTES_MIN,
     SCHEDULE_TICK_SECONDS,
     SCHEDULE_TICK_SECONDS_MAX,
     SCHEDULE_TICK_SECONDS_MIN,
@@ -234,6 +238,9 @@ class StopfinderOptionsFlow(config_entries.OptionsFlow):
         tick_current = options.get(
             CONF_SCHEDULE_TICK_SECONDS, SCHEDULE_TICK_SECONDS
         )
+        roster_current = options.get(
+            CONF_ROSTER_REFRESH_MINUTES, ROSTER_REFRESH_MINUTES
+        )
 
         hours = vol.All(
             vol.Coerce(int),
@@ -277,6 +284,15 @@ class StopfinderOptionsFlow(config_entries.OptionsFlow):
                     vol.Required(
                         CONF_ANNOUNCEMENT_TRAIL_HOURS, default=trail_current
                     ): hours,
+                    vol.Required(
+                        CONF_ROSTER_REFRESH_MINUTES, default=roster_current
+                    ): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(
+                            min=ROSTER_REFRESH_MINUTES_MIN,
+                            max=ROSTER_REFRESH_MINUTES_MAX,
+                        ),
+                    ),
                     vol.Required(
                         CONF_SCHEDULE_TICK_SECONDS, default=tick_current
                     ): vol.All(

@@ -36,6 +36,7 @@
         "data": {
           "gps_poll_seconds": "Seconds between position checks",
           "geo_alert_poll_seconds": "Seconds between geo alert checks",
+          "roster_refresh_minutes": "Minutes between schedule re-reads while a trip is running (picks up a bus substitution)",
           "announcement_poll_minutes": "Minutes between announcement checks",
           "announcement_lead_hours": "Hours before the first trip to start checking announcements",
           "announcement_trail_hours": "Hours after the last trip to keep checking announcements",
