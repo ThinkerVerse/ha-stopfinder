@@ -50,6 +50,18 @@ def _stop_attrs(trip, pickup: bool) -> dict[str, Any]:
     }
 
 
+def _bus_attrs(s: RiderState) -> dict[str, Any]:
+    """Whether today's bus is a substitute, and what it replaced."""
+    change = s.substitution
+    if change is None:
+        return {"substituted": False}
+    return {
+        "substituted": True,
+        "previous_bus_number": change.previous_bus_number,
+        "substituted_at": change.detected_at.isoformat(),
+    }
+
+
 def _geo_alert_attrs(s: RiderState) -> dict[str, Any]:
     """Detail for the last geo alert, alongside its timestamp state."""
     alert = s.geo_alert
@@ -79,6 +91,7 @@ SENSORS: tuple[StopfinderSensorDescription, ...] = (
         translation_key="bus_number",
         icon="mdi:bus",
         value_fn=lambda s: (s.active_trip.bus_number if s.active_trip else None),
+        attrs_fn=_bus_attrs,
     ),
     StopfinderSensorDescription(
         key="trip",

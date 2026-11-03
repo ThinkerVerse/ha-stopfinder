@@ -19,9 +19,11 @@ from sf.const import (
     CONF_ANNOUNCEMENT_POLL_MINUTES,
     CONF_ANNOUNCEMENT_TRAIL_HOURS,
     CONF_GEO_ALERT_POLL_SECONDS,
+    CONF_LAST_BUS_NUMBERS,
     CONF_ROSTER_REFRESH_MINUTES,
     CONF_SCHEDULE_TICK_SECONDS,
     CONF_SUBSCRIBER_ID,
+    CONF_SUBSTITUTION_NOTIFICATION,
     EVENT_VEHICLE_SUBSTITUTION,
     GEO_ALERT_POLL_SECONDS,
     ROSTER_REFRESH_MINUTES,
@@ -73,10 +75,19 @@ class _FakeBus:
         pass
 
 
+class _FakeConfigEntries:
+    """Just enough to let the coordinator persist the bus-number baseline."""
+
+    def async_update_entry(self, entry, data=None, **_kwargs) -> None:
+        if data is not None:
+            entry.data = data
+
+
 class _FakeHass:
     def __init__(self) -> None:
         self.bus = _FakeBus()
         self.config = type("Config", (), {"language": "en"})()
+        self.config_entries = _FakeConfigEntries()
 
 
 def _trip(*, start: datetime, finish: datetime) -> Trip:
@@ -412,18 +423,25 @@ class TestVehicleSubstitution:
 
         assert [e for e in fired if e[0] == EVENT_VEHICLE_SUBSTITUTION] == []
 
-    def test_a_rollover_is_not_a_substitution(self) -> None:
-        """Yesterday's bus differing from today's is normal, not a swap."""
+    def test_a_change_across_the_day_boundary_is_caught(self) -> None:
+        """The reported case: yesterday's bus is not the one running today.
+
+        The app learns this from a message thread the integration does not read,
+        so the roster comparison is the only signal available.
+        """
         coordinator = _coordinator(trip=self._running("233"))
+        asyncio.run(coordinator._refresh_schedule(NOW))  # seeds the baseline
         fired: list[tuple[str, dict]] = []
         coordinator.hass.bus.async_fire = lambda t, d: fired.append((t, d))
 
+        # Next morning, same trip, different bus.
         coordinator._schedule_day = date.today() - timedelta(days=1)
         coordinator.api.roster = [_schedule(self._running("242"))]
+        asyncio.run(coordinator._refresh_schedule(NOW + timedelta(hours=20)))
 
-        asyncio.run(coordinator._refresh_schedule())
-
-        assert [e for e in fired if e[0] == EVENT_VEHICLE_SUBSTITUTION] == []
+        [(_, data)] = [e for e in fired if e[0] == EVENT_VEHICLE_SUBSTITUTION]
+        assert data["previous_bus_number"] == "233"
+        assert data["bus_number"] == "242"
 
     def test_the_roster_is_throttled_like_everything_else(self) -> None:
         coordinator = _coordinator(trip=self._running("233"))
@@ -460,3 +478,130 @@ class TestVehicleSubstitution:
         asyncio.run(coordinator._async_gps_tick(NOW))
 
         assert coordinator.api.calls == []
+
+
+class TestSubstitutionBaseline:
+    """The comparison has to outlive the day boundary and a restart."""
+
+    def _running(self, bus: str) -> Trip:
+        trip = _trip(
+            start=NOW - timedelta(minutes=5), finish=NOW + timedelta(minutes=30)
+        )
+        trip.bus_number = bus
+        return trip
+
+    def test_the_baseline_is_written_to_the_entry(self) -> None:
+        coordinator = _coordinator(trip=self._running("233"))
+        asyncio.run(coordinator._refresh_schedule(NOW))
+
+        stored = coordinator.entry.data[CONF_LAST_BUS_NUMBERS]
+        assert stored == {f"{RIDER_ID}:303": "233"}
+
+    def test_a_restart_still_notices_the_swap(self) -> None:
+        """Fresh coordinator, no in-memory history — only the stored baseline."""
+        entry = ConfigEntry(
+            data={
+                CONF_SUBSCRIBER_ID: 2058262,
+                CONF_LAST_BUS_NUMBERS: {f"{RIDER_ID}:303": "233"},
+            }
+        )
+        coordinator = StopfinderCoordinator(hass=_FakeHass(), entry=entry)
+        coordinator.api = _CountingApi(roster=[_schedule(self._running("242"))])
+
+        async def _no_auth_needed() -> None:
+            return None
+
+        coordinator._ensure_token = _no_auth_needed
+        fired: list[tuple[str, dict]] = []
+        coordinator.hass.bus.async_fire = lambda t, d: fired.append((t, d))
+
+        asyncio.run(coordinator._refresh_schedule(NOW))
+
+        [(_, data)] = [e for e in fired if e[0] == EVENT_VEHICLE_SUBSTITUTION]
+        assert data["previous_bus_number"] == "233"
+        assert data["bus_number"] == "242"
+
+    def test_a_trip_seen_for_the_first_time_only_seeds(self) -> None:
+        """Nothing to have changed from, so no event on a first install."""
+        coordinator = _coordinator(trip=self._running("233"))
+        fired: list[tuple[str, dict]] = []
+        coordinator.hass.bus.async_fire = lambda t, d: fired.append((t, d))
+
+        asyncio.run(coordinator._refresh_schedule(NOW))
+
+        assert [e for e in fired if e[0] == EVENT_VEHICLE_SUBSTITUTION] == []
+        assert coordinator._last_bus_numbers == {f"{RIDER_ID}:303": "233"}
+
+    def test_a_no_service_day_does_not_wipe_the_baseline(self) -> None:
+        """Otherwise a weekend would erase it and Monday's swap would be missed."""
+        coordinator = _coordinator(trip=self._running("233"))
+        asyncio.run(coordinator._refresh_schedule(NOW))
+
+        coordinator.api.roster = []  # weekend: student present, no trips
+        asyncio.run(coordinator._refresh_schedule(NOW + timedelta(days=1)))
+
+        assert coordinator._last_bus_numbers == {f"{RIDER_ID}:303": "233"}
+
+    def test_the_stale_position_is_dropped_on_a_swap(self) -> None:
+        """It belongs to the other bus, and its timestamp would look fresh."""
+        coordinator = _coordinator(trip=self._running("233"))
+        asyncio.run(coordinator._refresh_schedule(NOW))
+        coordinator.data[RIDER_ID].fix = GpsFix(
+            latitude=39.1, longitude=-85.9, fix_time=NOW, raw={}
+        )
+
+        coordinator.api.roster = [_schedule(self._running("242"))]
+        asyncio.run(coordinator._refresh_schedule(NOW + timedelta(minutes=20)))
+
+        assert coordinator.data[RIDER_ID].fix is None
+
+    def test_an_unchanged_bus_keeps_the_position(self) -> None:
+        coordinator = _coordinator(trip=self._running("233"))
+        asyncio.run(coordinator._refresh_schedule(NOW))
+        coordinator.data[RIDER_ID].fix = GpsFix(
+            latitude=39.1, longitude=-85.9, fix_time=NOW, raw={}
+        )
+
+        asyncio.run(coordinator._refresh_schedule(NOW + timedelta(minutes=20)))
+
+        assert coordinator.data[RIDER_ID].fix is not None
+
+
+class TestSubstitutionNotification:
+    def _running(self, bus: str) -> Trip:
+        trip = _trip(
+            start=NOW - timedelta(minutes=5), finish=NOW + timedelta(minutes=30)
+        )
+        trip.bus_number = bus
+        return trip
+
+    def _swap(self, options: dict | None = None):
+        from homeassistant.components import persistent_notification
+
+        persistent_notification.created.clear()
+        coordinator = _coordinator(trip=self._running("233"), options=options)
+        asyncio.run(coordinator._refresh_schedule(NOW))
+        coordinator.api.roster = [_schedule(self._running("242"))]
+        asyncio.run(coordinator._refresh_schedule(NOW + timedelta(minutes=20)))
+        return persistent_notification.created
+
+    def test_a_notification_is_raised(self) -> None:
+        [note] = self._swap()
+
+        assert note["title"] == "Bus change for Test Student"
+        assert "242" in note["message"] and "233" in note["message"]
+        assert note["notification_id"] == f"stopfinder_substitution_{RIDER_ID}_303"
+
+    def test_it_can_be_turned_off(self) -> None:
+        assert self._swap({CONF_SUBSTITUTION_NOTIFICATION: False}) == []
+
+    def test_the_substitution_is_recorded_on_the_rider(self) -> None:
+        coordinator = _coordinator(trip=self._running("233"))
+        asyncio.run(coordinator._refresh_schedule(NOW))
+        coordinator.api.roster = [_schedule(self._running("242"))]
+        asyncio.run(coordinator._refresh_schedule(NOW + timedelta(minutes=20)))
+
+        change = coordinator.data[RIDER_ID].substitution
+        assert change.previous_bus_number == "233"
+        assert change.bus_number == "242"
+        assert change.detected_at == NOW + timedelta(minutes=20)

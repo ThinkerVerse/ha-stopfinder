@@ -30,6 +30,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -58,6 +59,7 @@ from .const import (
     CONF_GEO_ALERT_POLL_SECONDS,
     CONF_DEVICE_ID,
     CONF_GPS_POLL_SECONDS,
+    CONF_LAST_BUS_NUMBERS,
     CONF_PASSWORD,
     CONF_SCHEDULE_TICK_SECONDS,
     CONF_REFRESH_TOKEN,
@@ -76,12 +78,25 @@ from .const import (
     GPS_SEARCHING,
     GPS_STALE_AFTER_SECONDS,
     GPS_VALID,
+    CONF_SUBSTITUTION_NOTIFICATION,
     ROSTER_REFRESH_MINUTES,
     SCHEDULE_TICK_SECONDS,
+    SUBSTITUTION_NOTIFICATION,
     TOKEN_REFRESH_MARGIN_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class Substitution:
+    """A bus number that changed under a trip."""
+
+    trip_id: int
+    trip_name: str
+    previous_bus_number: str
+    bus_number: str
+    detected_at: datetime
 
 
 @dataclass
@@ -92,6 +107,7 @@ class RiderState:
     active_trip: Trip | None = None
     fix: GpsFix | None = None
     geo_alert: GeoAlert | None = None
+    substitution: Substitution | None = None
     district: str = ""
 
     @property
@@ -149,6 +165,10 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         self._tokens: Tokens | None = None
         self._schedule_day: date | None = None
         self._roster_refreshed_at: datetime | None = None
+        # "{riderId}:{tripId}" -> bus number, as of the last roster we saw.
+        self._last_bus_numbers: dict[str, str] = dict(
+            entry.data.get(CONF_LAST_BUS_NUMBERS) or {}
+        )
         self._unsub_schedule = None
         self._schedule_interval: timedelta | None = None
         self._unsub_gps = None
@@ -429,41 +449,108 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
         except Exception as err:  # noqa: BLE001
             raise UpdateFailed(f"Roster fetch failed: {err}") from err
 
-        # Only compare against a roster from the *same* day. At rollover the
-        # trips are legitimately different, and treating that as a substitution
-        # would fire a spurious event every morning.
-        same_day = self._schedule_day == date.today()
+        at = now or datetime.now(timezone.utc)
+        rolled_over = self._schedule_day != date.today()
 
         new_data: dict[int, RiderState] = {}
-        substitutions: list[tuple[RiderState, Trip, str]] = []
+        substitutions: list[tuple[RiderState, Substitution]] = []
         for sched in schedules:
             prev = (self.data or {}).get(sched.rider_id)
             state = RiderState(
                 schedule=sched,
                 fix=prev.fix if prev else None,
                 geo_alert=prev.geo_alert if prev else None,
+                # "substituted" means "substituted today", so a new day starts
+                # clean rather than carrying yesterday's swap forever.
+                substitution=None if rolled_over else (
+                    prev.substitution if prev else None
+                ),
                 district=self.district,
             )
-            if same_day and prev is not None:
-                for trip, was in _bus_changes(prev.schedule, sched):
-                    substitutions.append((state, trip, was))
+            for change in self._detect_substitutions(sched, at):
+                state.substitution = change
+                # The position we are holding belongs to the bus that just came
+                # off this trip. It is not merely stale — it is the wrong
+                # vehicle, and its timestamp is recent enough to pass the
+                # freshness gate, so the map would confidently show the old bus
+                # until the substitute reported for the first time.
+                state.fix = None
+                substitutions.append((state, change))
             new_data[sched.rider_id] = state
+
+        seen = {
+            f"{sched.rider_id}:{trip.trip_id}"
+            for sched in schedules
+            for trip in sched.trips
+        }
+        if seen:
+            # Keep the baseline bounded for a district whose trip ids rotate.
+            # Only when there were trips: pruning on a no-service day would wipe
+            # it and Monday's substitution would go unnoticed.
+            self._last_bus_numbers = {
+                key: bus for key, bus in self._last_bus_numbers.items()
+                if key in seen
+            }
 
         self._schedule_day = date.today()
         # Record the caller's clock, not a fresh read, so the refresh interval
         # is measured against the same "now" the tick is working from.
-        self._roster_refreshed_at = now or datetime.now(timezone.utc)
+        self._roster_refreshed_at = at
+        self._persist_bus_numbers()
         self.async_set_updated_data(new_data)
 
-        for state, trip, was in substitutions:
+        for state, change in substitutions:
             _LOGGER.info(
                 "Vehicle substitution on trip %s: bus %s -> %s",
-                trip.name or trip.trip_id, was or "none", trip.bus_number or "none",
+                change.trip_name or change.trip_id,
+                change.previous_bus_number or "none",
+                change.bus_number or "none",
             )
-            self._fire_substitution_event(state, trip, was)
+            self._fire_substitution_event(state, change)
+            self._notify_substitution(state, change)
+
+    def _detect_substitutions(
+        self, sched: StudentSchedule, at: datetime
+    ) -> list[Substitution]:
+        """Compare each trip's bus against the last one we recorded for it.
+
+        The baseline is persisted, so this catches the case the app announces
+        through a message thread we do not read: yesterday's bus is not the one
+        running this morning. A trip we have never seen before only seeds the
+        baseline — there is nothing to have changed from.
+        """
+        changes: list[Substitution] = []
+        for trip in sched.trips:
+            key = f"{sched.rider_id}:{trip.trip_id}"
+            was = self._last_bus_numbers.get(key)
+            self._last_bus_numbers[key] = trip.bus_number
+            if was is None or was == trip.bus_number:
+                continue
+            changes.append(
+                Substitution(
+                    trip_id=trip.trip_id,
+                    trip_name=trip.name,
+                    previous_bus_number=was,
+                    bus_number=trip.bus_number,
+                    detected_at=at,
+                )
+            )
+        return changes
+
+    def _persist_bus_numbers(self) -> None:
+        """Write the baseline to the entry so a restart keeps comparing.
+
+        """
+        stored = self.entry.data.get(CONF_LAST_BUS_NUMBERS) or {}
+        if stored == self._last_bus_numbers:
+            return
+        self.hass.config_entries.async_update_entry(
+            self.entry,
+            data={**self.entry.data, CONF_LAST_BUS_NUMBERS: self._last_bus_numbers},
+        )
 
     def _fire_substitution_event(
-        self, rider: RiderState, trip: Trip, previous_bus: str
+        self, rider: RiderState, change: Substitution
     ) -> None:
         self.hass.bus.async_fire(
             EVENT_VEHICLE_SUBSTITUTION,
@@ -471,11 +558,39 @@ class StopfinderCoordinator(DataUpdateCoordinator[dict[int, RiderState]]):
                 "entry_id": self.entry.entry_id,
                 "rider_id": rider.rider_id,
                 "student": rider.schedule.full_name,
-                "trip_id": trip.trip_id,
-                "trip": trip.name,
-                "previous_bus_number": previous_bus,
-                "bus_number": trip.bus_number,
+                "trip_id": change.trip_id,
+                "trip": change.trip_name,
+                "previous_bus_number": change.previous_bus_number,
+                "bus_number": change.bus_number,
+                "detected_at": change.detected_at.isoformat(),
             },
+        )
+
+    def _notify_substitution(
+        self, rider: RiderState, change: Substitution
+    ) -> None:
+        """Raise a Home Assistant notification, standing in for the app's own.
+
+        The app announces substitutions through a message thread this
+        integration does not read, so the swap would otherwise be silent unless
+        the user had wired up an automation on the event.
+        """
+        if not self.entry.options.get(
+            CONF_SUBSTITUTION_NOTIFICATION, SUBSTITUTION_NOTIFICATION
+        ):
+            return
+        who = rider.schedule.full_name or f"Rider {rider.rider_id}"
+        trip = change.trip_name or f"trip {change.trip_id}"
+        persistent_notification.async_create(
+            self.hass,
+            f"{trip} is now bus {change.bus_number or 'unassigned'} "
+            f"(was {change.previous_bus_number or 'unassigned'}).",
+            title=f"Bus change for {who}",
+            # Stable per trip, so a second swap replaces the first rather than
+            # stacking another card on the pile.
+            notification_id=(
+                f"{DOMAIN}_substitution_{rider.rider_id}_{change.trip_id}"
+            ),
         )
 
     def _recompute_active_trips(self, now: datetime) -> None:
@@ -799,22 +914,6 @@ def _title_case(value: str) -> str:
         return ""
     parts = [part.strip() for part in value.split(",")]
     return ", ".join(part.title() if part.islower() else part for part in parts)
-
-
-def _bus_changes(
-    previous: StudentSchedule, current: StudentSchedule
-) -> list[tuple[Trip, str]]:
-    """Trips whose bus number changed, as (new trip, previous bus number).
-
-    Matched on trip id, since that is what survives a substitution — the bus
-    number is precisely the thing that moves.
-    """
-    was = {trip.trip_id: trip.bus_number for trip in previous.trips}
-    changed: list[tuple[Trip, str]] = []
-    for trip in current.trips:
-        if trip.trip_id in was and was[trip.trip_id] != trip.bus_number:
-            changed.append((trip, was[trip.trip_id]))
-    return changed
 
 
 def _soonest(trips: list[Trip], attr: str, now: datetime) -> Trip | None:

@@ -170,8 +170,35 @@ That matches the app, which re-fetches the roster on
 — which is exactly why the app follows the substitute bus and an
 integration that refreshed only at day rollover did not.
 
-A change of bus number on the same trip, within the same day, raises
-**`stopfinder_vehicle_substitution`**:
+### How a substitution is noticed
+
+The app announces substitutions through a **message thread**, which this
+integration does not read. So rather than guess at that feed, the swap is
+detected from the roster itself: the last bus number seen for each trip is
+remembered, and any change to it is a substitution — including the common case
+where **yesterday's bus is not the one running this morning**.
+
+That baseline is persisted on the config entry, so it survives both the day
+boundary and a Home Assistant restart. A trip seen for the first time only seeds
+the baseline, since there is nothing for it to have changed from, and a
+no-service day leaves the baseline untouched so a Monday swap is still caught.
+
+Two things happen on a change:
+
+- **`stopfinder_vehicle_substitution`** is raised on the event bus.
+- **A Home Assistant notification** appears, standing in for the app's own.
+  Turn it off with *Raise a notification when the bus is substituted*.
+
+The **Bus number** sensor also carries `substituted`, `previous_bus_number` and
+`substituted_at` as attributes, cleared at the start of each day so
+`substituted` means "substituted today".
+
+**The held position is discarded too.** A fix from the bus that just came off the
+trip is not merely stale — it is the wrong vehicle, and its timestamp is recent
+enough to pass the freshness gate, so the map would otherwise show the old bus
+with apparent confidence until the substitute reported for the first time.
+
+For automations:
 
 ```yaml
 automation:
@@ -190,13 +217,12 @@ automation:
 ```
 
 Event data: `entry_id`, `rider_id`, `student`, `trip_id`, `trip`,
-`previous_bus_number`, `bus_number`.
+`previous_bus_number`, `bus_number`, `detected_at`.
 
-This is **derived from the roster**, not read from a notification feed, so it
-does not depend on whichever channel the district happens to use to announce the
-change. Comparison is restricted to rosters from the same day: at rollover the
-trips legitimately differ, and treating that as a substitution would fire every
-morning.
+**Timing caveat.** The roster is only re-read while a trip window is open, so a
+swap entered after the window opens is noticed within one refresh interval —
+up to 15 minutes by default. Lowering *Minutes between schedule re-reads* to 5
+narrows that at the cost of a few more requests per window.
 
 ## Geo alerts
 
@@ -317,6 +343,7 @@ Everything is tunable under **Configure**:
 | Seconds between position checks | 10 | 10–300 |
 | Seconds between geo alert checks | 20 | 10–300 |
 | Minutes between schedule re-reads while a trip is running | 15 | 5–240 |
+| Raise a notification when the bus is substituted | on | on/off |
 | Minutes between announcement checks | 15 | 5–1440 |
 | Hours before the first trip to start checking announcements | 3 | 0–12 |
 | Hours after the last trip to keep checking announcements | 3 | 0–12 |
@@ -419,7 +446,7 @@ flow exports, APKs, and source maps.
 
 ```bash
 # after committing changes and bumping manifest.json "version"
-git tag v1.5.0
+git tag v1.6.0
 git push origin main --tags
 # then create a GitHub Release from that tag; HACS will offer it as an update
 ```
