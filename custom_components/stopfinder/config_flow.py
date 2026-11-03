@@ -34,6 +34,7 @@ from .const import (
     CONF_SCHEDULE_TICK_SECONDS,
     CONF_SF_CLIENT_ID,
     CONF_SUBSCRIBER_ID,
+    CONF_SUBSTITUTION_NOTIFICATION,
     CONF_USERNAME,
     DOMAIN,
     GEO_ALERT_POLL_SECONDS,
@@ -48,6 +49,7 @@ from .const import (
     SCHEDULE_TICK_SECONDS,
     SCHEDULE_TICK_SECONDS_MAX,
     SCHEDULE_TICK_SECONDS_MIN,
+    SUBSTITUTION_NOTIFICATION,
 )
 
 STEP_USER_SCHEMA = vol.Schema(
@@ -241,6 +243,9 @@ class StopfinderOptionsFlow(config_entries.OptionsFlow):
         roster_current = options.get(
             CONF_ROSTER_REFRESH_MINUTES, ROSTER_REFRESH_MINUTES
         )
+        notify_current = options.get(
+            CONF_SUBSTITUTION_NOTIFICATION, SUBSTITUTION_NOTIFICATION
+        )
 
         hours = vol.All(
             vol.Coerce(int),
@@ -293,6 +298,9 @@ class StopfinderOptionsFlow(config_entries.OptionsFlow):
                             max=ROSTER_REFRESH_MINUTES_MAX,
                         ),
                     ),
+                    vol.Required(
+                        CONF_SUBSTITUTION_NOTIFICATION, default=notify_current
+                    ): bool,
                     vol.Required(
                         CONF_SCHEDULE_TICK_SECONDS, default=tick_current
                     ): vol.All(

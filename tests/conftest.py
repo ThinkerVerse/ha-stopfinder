@@ -164,6 +164,17 @@ def _install_homeassistant_stubs() -> None:
     components = _module("homeassistant.components")
     components.__path__ = []
 
+    pn = _module("homeassistant.components.persistent_notification")
+    pn.created: list[dict] = []
+
+    def _async_create(hass, message, title=None, notification_id=None):
+        pn.created.append(
+            {"message": message, "title": title, "notification_id": notification_id}
+        )
+
+    pn.async_create = _async_create
+    components.persistent_notification = pn
+
     sensor = _module("homeassistant.components.sensor")
 
     @dataclass(frozen=True, kw_only=True)

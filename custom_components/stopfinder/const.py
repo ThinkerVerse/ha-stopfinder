@@ -161,4 +161,16 @@ CONF_ROSTER_REFRESH_MINUTES: Final = "roster_refresh_minutes"
 # cannot see.
 EVENT_VEHICLE_SUBSTITUTION: Final = "stopfinder_vehicle_substitution"
 
+# The last bus number seen for each trip, persisted on the config entry so the
+# comparison survives both the day boundary and a restart. Keyed
+# "{riderId}:{tripId}" because that is what identifies a trip across days; the
+# bus number is precisely the part that moves.
+CONF_LAST_BUS_NUMBERS: Final = "last_bus_numbers"
+
+# Raise a Home Assistant notification as well as the event. The app announces a
+# substitution through a message thread, which this integration does not read, so
+# without this the change is silent unless the user wires up an automation.
+CONF_SUBSTITUTION_NOTIFICATION: Final = "substitution_notification"
+SUBSTITUTION_NOTIFICATION: Final = True
+
 PLATFORMS: Final = ["device_tracker", "sensor"]
